@@ -327,6 +327,12 @@ struct io_submit_state {
 	unsigned int		ios_left;
 };
 
+
+struct io_bpf_ctx {
+	struct io_ring_ctx		*ctx;
+	struct io_submit_link	link;
+};
+
 struct io_ring_ctx {
 	struct {
 		struct percpu_ref	refs;
@@ -871,10 +877,6 @@ struct io_op_def {
 	unsigned		plug : 1;
 	/* size of async data needed, if any */
 	unsigned short		async_size;
-};
-
-struct io_bpf_ctx {
-
 };
 
 static const struct io_op_def io_op_defs[] = {
@@ -6545,7 +6547,9 @@ static int io_init_req(struct io_ring_ctx *ctx, struct io_kiocb *req,
 			ret = -EBADF;
 	}
 
-	state->ios_left--;
+	if (state->ios_left > 1)
+		state->ios_left--;
+
 	return ret;
 }
 
@@ -10072,10 +10076,64 @@ out_quiesce:
 	return ret;
 }
 
+static int io_bpf_prep_req(struct io_bpf_ctx *bpf_ctx, 
+							const struct io_uring_sqe *sqe)
+{
+	struct io_ring_ctx *ctx = bpf_ctx->ctx;
+	struct io_kiocb    *req = io_alloc_req(ctx);
+	int ret;
+
+	if (unlikely(!req))
+		return -ENOMEM;
+	if (!percpu_ref_tryget_many(&ctx->refs, 1)) {
+		kmem_cache_free(req_cachep, req);
+		return -EAGAIN;
+	}
+	percpu_counter_add(&current->io_uring->inflight, 1);
+	refcount_add(1, &current->usage);
+
+	ret = io_init_req(ctx, req, sqe);
+	if (unlikely(ret))
+		goto fail_req;
+
+	ret = io_submit_sqe(ctx, req, sqe);
+	if (!ret)
+		return 0;
+
+fail_req:
+	io_double_put_req(req);
+	return ret;
+}
+
+BPF_CALL_3(bpf_io_uring_queue_sqe, void *, ctx, const void *, psqe, u32, len)
+{
+	const struct io_uring_sqe *sqe = psqe;
+	struct io_bpf_ctx *bpf_ctx = ctx;
+
+	if (len != sizeof(struct io_uring_sqe))
+		return -EINVAL;
+	
+	return io_bpf_prep_req(bpf_ctx, sqe);
+}
+
+const struct bpf_func_proto bpf_io_uring_queue_sqe_proto = {
+	.func = bpf_io_uring_queue_sqe,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_MEM,
+	.arg3_type = ARG_CONST_SIZE,
+};
+
 static const struct bpf_func_proto * 
 io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	return bpf_base_func_proto(func_id);
+	switch (func_id) {
+		case BPF_FUNC_iouring_queue_sqe:
+			return &bpf_io_uring_queue_sqe_proto;
+		default:
+			return bpf_base_func_proto(func_id);
+	}
 }
 
 static bool io_bpf_is_valid_access(int off, int size, 
@@ -10105,8 +10163,15 @@ static void io_bpf_run(struct io_kiocb *req)
 		return;
 	}
 
-	memset(&bpf_ctx, 0, sizeof(bpf_ctx));
+	io_submit_state_start(&ctx->submit_state, 1);
+	bpf_ctx.ctx = ctx;
+	bpf_ctx.link.head = NULL;
+
 	BPF_PROG_RUN(req->bpf.prog, &bpf_ctx);
+	// if (bpf_ctx.link.head)
+	// 	io_queue_link_head(bpf_ctx.link.head);
+	io_submit_state_end(&ctx->submit_state, ctx);
+
 	io_req_complete(req, 0);
 }
 
