@@ -660,6 +660,11 @@ struct io_unlink {
 	struct filename			*filename;
 };
 
+struct io_bpf {
+	struct file		*file;
+	struct bpf_prog *prog;
+};
+
 struct io_completion {
 	struct file			*file;
 	struct list_head		list;
@@ -796,6 +801,7 @@ struct io_kiocb {
 		struct io_shutdown	shutdown;
 		struct io_rename	rename;
 		struct io_unlink	unlink;
+		struct io_bpf		bpf;
 		/* use only after cleaning per-op data, see io_clean_op() */
 		struct io_completion	compl;
 	};
@@ -865,6 +871,10 @@ struct io_op_def {
 	unsigned		plug : 1;
 	/* size of async data needed, if any */
 	unsigned short		async_size;
+};
+
+struct io_bpf_ctx {
+
 };
 
 static const struct io_op_def io_op_defs[] = {
@@ -1011,6 +1021,8 @@ static const struct io_op_def io_op_defs[] = {
 	},
 	[IORING_OP_RENAMEAT] = {},
 	[IORING_OP_UNLINKAT] = {},
+	[IORING_OP_BPF] = {
+	}
 };
 
 static bool io_disarm_next(struct io_kiocb *req);
@@ -1052,6 +1064,8 @@ static int io_setup_async_rw(struct io_kiocb *req, const struct iovec *iovec,
 static void io_req_task_queue(struct io_kiocb *req);
 static void io_submit_flush_completions(struct io_comp_state *cs,
 					struct io_ring_ctx *ctx);
+
+static void io_bpf_run(struct io_kiocb *req);
 
 static struct kmem_cache *req_cachep;
 
@@ -3911,6 +3925,53 @@ static int io_openat(struct io_kiocb *req, unsigned int issue_flags)
 	return io_openat2(req, issue_flags);
 }
 
+static int io_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	struct io_ring_ctx *ctx = req->ctx;
+	struct bpf_prog *prog;
+	unsigned int idx;
+
+	if (unlikely(ctx->flags & (IORING_SETUP_IOPOLL | IORING_SETUP_SQPOLL)))
+		return -EINVAL;
+	if (unlikely(req->flags & (REQ_F_FIXED_FILE | REQ_F_BUFFER_SELECT)))
+		return -EINVAL;
+	if (sqe->ioprio || sqe->len || sqe->cancel_flags)
+		return -EINVAL;
+	if (sqe->addr)
+		return -EINVAL;
+
+	idx = READ_ONCE(sqe->off);
+	if (unlikely(idx >= ctx->nr_bpf_progs))
+		return -EFAULT;
+	idx = array_index_nospec(idx, ctx->nr_bpf_progs);
+	prog = ctx->bpf_progs[idx].prog;
+	if (!prog)
+		return -EFAULT;
+	req->bpf.prog = prog;
+	return 0;
+}
+
+static void io_bpf_run_task_work(struct callback_head *cb)
+{
+	// no task_work?
+	struct io_kiocb *req = container_of(cb, struct io_kiocb, task_work);
+	struct io_ring_ctx *ctx = req->ctx;
+
+	mutex_lock(&ctx->uring_lock);
+	io_bpf_run(req);
+	mutex_unlock(&ctx->uring_lock);
+}
+
+static int io_bpf(struct io_kiocb *req, unsigned int issue_flags)
+{
+	init_task_work(&req->task_work, io_bpf_run_task_work);
+	if (unlikely(io_req_task_work_add(req))) {
+		percpu_ref_get(&req->ctx->refs);
+		io_req_task_work_add_fallback(req, io_req_task_cancel);
+	}
+	return 0;
+}
+
 static int io_remove_buffers_prep(struct io_kiocb *req,
 				  const struct io_uring_sqe *sqe)
 {
@@ -5892,6 +5953,8 @@ static int io_req_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 		return io_renameat_prep(req, sqe);
 	case IORING_OP_UNLINKAT:
 		return io_unlinkat_prep(req, sqe);
+	case IORING_OP_BPF:
+		return io_bpf_prep(req, sqe);
 	}
 
 	printk_once(KERN_WARNING "io_uring: unhandled opcode %d\n",
@@ -6156,6 +6219,9 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 		break;
 	case IORING_OP_UNLINKAT:
 		ret = io_unlinkat(req, issue_flags);
+		break;
+	case IORING_OP_BPF:
+		ret = io_bpf(req, issue_flags);
 		break;
 	default:
 		ret = -EINVAL;
@@ -10025,6 +10091,23 @@ const struct bpf_prog_ops bpf_io_prog_ops = {};
 const struct bpf_verifier_ops bpf_io_uring_verifier_ops = {
 	.get_func_proto		= io_bpf_func_proto,
 	.is_valid_access	= io_bpf_is_valid_access,
+};
+
+static void io_bpf_run(struct io_kiocb *req)
+{
+	struct io_ring_ctx *ctx = req->ctx;
+	struct io_bpf_ctx	bpf_ctx;
+
+	lockdep_assert_held(&req->ctx->uring_lock);
+
+	if (unlikely(percpu_ref_is_dying(&ctx->refs))) {
+		io_req_complete(req, -EAGAIN);
+		return;
+	}
+
+	memset(&bpf_ctx, 0, sizeof(bpf_ctx));
+	BPF_PROG_RUN(req->bpf.prog, &bpf_ctx);
+	io_req_complete(req, 0);
 }
 
 SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
