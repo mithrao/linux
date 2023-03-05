@@ -78,6 +78,7 @@
 #include <linux/task_work.h>
 #include <linux/pagemap.h>
 #include <linux/io_uring.h>
+#include <linux/bpf.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/io_uring.h>
@@ -250,6 +251,10 @@ struct io_restriction {
 	bool registered;
 };
 
+struct io_bpf_prog {
+	struct bpf_prog *prog;
+};
+
 enum {
 	IO_SQ_THREAD_SHOULD_STOP = 0,
 	IO_SQ_THREAD_SHOULD_PARK,
@@ -394,6 +399,11 @@ struct io_ring_ctx {
 	/* if used, fixed mapped user buffers */
 	unsigned		nr_user_bufs;
 	struct io_mapped_ubuf	*user_bufs;
+
+		/* bpf programs */
+	struct io_bpf_prog	*bpf_progs;
+	unsigned 			nr_bpf_progs;
+
 
 	struct user_struct	*user;
 
@@ -8489,6 +8499,63 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 	kfree(ctx);
 }
 
+static int io_bpf_detach(struct io_ring_ctx *ctx)
+{
+	int i;
+	if (!ctx->nr_bpf_progs)
+		return -ENXIO;
+
+	for (i = 0; i < ctx->nr_bpf_progs; ++i) {
+		struct bpf_prog *prog = ctx->bpf_progs[i].prog;
+		if (prog)
+			bpf_prog_put(prog);
+	}
+	kfree(ctx->bpf_progs);
+	ctx->bpf_progs = NULL;
+	ctx->nr_bpf_progs = 0;
+	return 0;
+}
+
+static int io_bpf_attach(struct io_ring_ctx *ctx, void __user *arg,
+							unsigned int nr_args)
+{
+	u32 __user *fds = arg;
+	int i, ret = 0;
+	
+	if (!nr_args || nr_args > 100) 
+		return -EINVAL;
+	if (ctx->nr_bpf_progs)
+		return -EBUSY;
+	
+	ctx->bpf_progs = kcalloc(nr_args, sizeof(ctx->bpf_progs[0]), GFP_KERNEL);
+
+	if (!ctx->bpf_progs)
+		return -ENOMEM;
+	
+	for (i = 0; i < nr_args; ++i) {
+		struct bpf_prog *prog;
+		u32 fd;
+
+		if (copy_from_user(&fd, &fds[i], sizeof(fd))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (fd == -1)
+			continue;
+		
+		prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_IOURING);
+		if (IS_ERR(prog)) {
+			ret = PTR_ERR(prog);
+			break;
+		}
+		ctx->bpf_progs[i].prog = prog;
+	}
+	ctx->nr_bpf_progs = i;
+	if (ret)
+		io_bpf_detach(ctx);
+	return ret;
+}
+
 static __poll_t io_uring_poll(struct file *file, poll_table *wait)
 {
 	struct io_ring_ctx *ctx = file->private_data;
@@ -9915,6 +9982,15 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 	case IORING_REGISTER_RESTRICTIONS:
 		ret = io_register_restrictions(ctx, arg, nr_args);
 		break;
+	case IORING_ATTACH_BPF:
+		ret = io_bpf_attach(ctx, arg, nr_args);
+		break;
+	case IORING_DETACH_BPF:
+		ret = -EINVAL;
+		if (arg || nr_args)
+			break;
+		ret = io_bpf_detach(ctx);
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -9930,8 +10006,8 @@ out_quiesce:
 	return ret;
 }
 
-static const struct bpf_func_proto * io_bpf_func_proto(enum bpf_func_if, 
-											const struct bpf_prog *prog)
+static const struct bpf_func_proto * 
+io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	return bpf_base_func_proto(func_id);
 }
