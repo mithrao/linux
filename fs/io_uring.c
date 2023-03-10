@@ -92,6 +92,7 @@
 #define IORING_MAX_CQ_ENTRIES	(2 * IORING_MAX_ENTRIES)
 
 #define IO_DEFAULT_CQ		0
+#define IO_MAX_CQRINGS		1024
 /*
 * shift of 9 is 512 entries, or exactly one page on 64-bit archs
 */
@@ -423,7 +424,7 @@ struct io_ring_ctx {
 	unsigned		cq_last_tm_flush;
 	unsigned long		cq_check_overflow;
 	struct wait_queue_head	cq_wait;
-	struct io_cqring	cqs[1];
+	struct io_cqring	*cqs;
 	unsigned int 		cq_nr;
 
 	struct {
@@ -1152,6 +1153,23 @@ static inline bool io_is_timeout_noseq(struct io_kiocb *req)
 	return !req->timeout.off;
 }
 
+static long io_get_cqring_size(struct io_uring_params *p, unsigned entries)
+{
+	/* if IORING_SETUP_CQSIZE is set, we do the same roundup
+	   to a power-of-two. 
+	   we do not impose any cq vs. sq ring sizing 
+	*/
+	if (!entries)
+		return -EINVAL;
+	if (entries > IORING_MAX_CQ_ENTRIES) {
+		if (!(p->flags & IORING_SETUP_CLAMP))
+			return -EINVAL;
+		entries = IORING_MAX_CQ_ENTRIES;
+	}
+	entries = roundup_pow_of_two(entries);
+	return entries;
+}
+
 static struct io_ring_ctx *io_ring_ctx_alloc(struct io_uring_params *p)
 {
 	struct io_ring_ctx *ctx;
@@ -1160,6 +1178,10 @@ static struct io_ring_ctx *io_ring_ctx_alloc(struct io_uring_params *p)
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
 		return NULL;
+
+	ctx->cqs = kmalloc_array(p->nr_cq + 1, sizeof(ctx->cqs[0]), GFP_KERNEL);
+	if (!ctx->cqs)
+		goto err;
 
 	/*
 	 * Use 5 bits less than the max cq entries, that should give us around
@@ -8557,6 +8579,8 @@ static void io_req_caches_free(struct io_ring_ctx *ctx)
 
 static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 {
+	unsigned int i;
+
 	/*
 	 * Some may use context even when all refs and requests have been put,
 	 * and they are free to do so while still holding uring_lock or
@@ -8590,6 +8614,10 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 
 	io_mem_free(ctx->rings);
 	io_mem_free(ctx->sq_sqes);
+	for (i = 1; i < ctx->cq_nr; i++) {
+		io_mem_free(ctx->cqs[i].rings);
+	}
+	kfree(ctx->cqs);
 
 	percpu_ref_exit(&ctx->refs);
 	free_uid(ctx->user);
@@ -9561,11 +9589,39 @@ static const struct file_operations io_uring_fops = {
 #endif
 };
 
+static void __io_init_cqring(struct io_cqring *cq, struct io_rings *rings,
+							unsigned int entries)
+{
+	WRITE_ONCE(rings->cq_ring_entries, entries);
+	WRITE_ONCE(rings->cq_ring_mask, entries - 1);
+
+	cq->cached_tail = 0;
+	cq->rings = rings;
+	cq->entries = entries;
+}
+
+static int io_init_cqring(struct io_cqring *cq, unsigned int entries)
+{
+	struct io_rings *rings;
+	size_t size;
+
+	size = rings_size(0, entries, NULL);
+	if (size == SIZE_MAX)
+		return 	-EOVERFLOW;
+	rings = io_mem_alloc(size);
+	if (!rings)
+		return -ENOMEM;
+	__io_init_cqring(cq, rings, entries);
+	return 0;
+}
+
 static int io_allocate_scq_urings(struct io_ring_ctx *ctx,
 				  struct io_uring_params *p)
 {
+	u32 __user *cq_sizes = u64_to_user_ptr(p->cq_sizes);
 	struct io_rings *rings;
 	size_t size, sq_array_offset;
+	int i, ret;
 
 	/* make sure these are sane, as we already accounted them */
 	ctx->sq_entries = p->sq_entries;
@@ -9581,30 +9637,44 @@ static int io_allocate_scq_urings(struct io_ring_ctx *ctx,
 	ctx->rings = rings;
 	ctx->sq_array = (u32 *)((char *)rings + sq_array_offset);
 	rings->sq_ring_mask = p->sq_entries - 1;
-	rings->cq_ring_mask = p->cq_entries - 1;
 	rings->sq_ring_entries = p->sq_entries;
-	rings->cq_ring_entries = p->cq_entries;
-
-	ctx->cqs[0].cached_tail = 0;
-	ctx->cqs[0].rings = rings;
-	ctx->cqs[0].entries = p->cq_entries;
+	__io_init_cqring(&ctx->cqs[0], rings, p->cq_entries);
 	ctx->cq_nr = 1;
 
 	size = array_size(sizeof(struct io_uring_sqe), p->sq_entries);
-	if (size == SIZE_MAX) {
-		io_mem_free(ctx->rings);
-		ctx->rings = NULL;
-		return -EOVERFLOW;
-	}
+	ret = -EOVERFLOW;
+	if (unlikely(size == SIZE_MAX))
+		goto err;
 
 	ctx->sq_sqes = io_mem_alloc(size);
-	if (!ctx->sq_sqes) {
-		io_mem_free(ctx->rings);
-		ctx->rings = NULL;
-		return -ENOMEM;
+	
+	ret = -ENOMEM;
+	if (unlikely(!ctx->sq_sqes))
+		goto err;
+
+	for (i = 0; i < p->nr_cq; i++, ctx->cq_nr++) {
+		u32 sz;
+		long entries;
+
+		ret = -EFAULT;
+		if (copy_from_user(&sz, &cq_sizes[i], sizeof(sz)))
+			goto err;
+		entries = io_get_cqring_size(p, sz);
+		if (entries < 0) {
+			ret = entries;
+			goto err;
+		}
+		ret = io_init_cqring(&ctx->cqs[i+1], entries);
+		if (ret)
+			goto err;
 	}
 
 	return 0;
+
+err:
+	io_mem_free(ctx->rings);
+	ctx->rings = NULL;
+	return ret;
 }
 
 static int io_uring_install_fd(struct io_ring_ctx *ctx, struct file *file)
@@ -9680,24 +9750,20 @@ static int io_uring_create(unsigned entries, struct io_uring_params *p,
 	 */
 	p->sq_entries = roundup_pow_of_two(entries);
 	if (p->flags & IORING_SETUP_CQSIZE) {
-		/*
-		 * If IORING_SETUP_CQSIZE is set, we do the same roundup
-		 * to a power-of-two, if it isn't already. We do NOT impose
-		 * any cq vs sq ring sizing.
-		 */
-		if (!p->cq_entries)
+		long cq_entries = roundup_pow_of_two(p->cq_entries);
+		if (cq_entries < 0)
+			return cq_entries;
+		if (cq_entries < p->sq_entries)
 			return -EINVAL;
-		if (p->cq_entries > IORING_MAX_CQ_ENTRIES) {
-			if (!(p->flags & IORING_SETUP_CLAMP))
-				return -EINVAL;
-			p->cq_entries = IORING_MAX_CQ_ENTRIES;
-		}
-		p->cq_entries = roundup_pow_of_two(p->cq_entries);
-		if (p->cq_entries < p->sq_entries)
-			return -EINVAL;
+		p->cq_entries = cq_entries;
 	} else {
 		p->cq_entries = 2 * p->sq_entries;
 	}
+
+	if (p->nr_cq > IO_MAX_CQRINGS)
+		return -EINVAL;
+	if (!p->nr_cq != !p->cq_sizes)
+		return -EINVAL;
 
 	ctx = io_ring_ctx_alloc(p);
 	if (!ctx)
@@ -9784,14 +9850,9 @@ err:
 static long io_uring_setup(u32 entries, struct io_uring_params __user *params)
 {
 	struct io_uring_params p;
-	int i;
 
 	if (copy_from_user(&p, params, sizeof(p)))
 		return -EFAULT;
-	for (i = 0; i < ARRAY_SIZE(p.resv); i++) {
-		if (p.resv[i])
-			return -EINVAL;
-	}
 
 	if (p.flags & ~(IORING_SETUP_IOPOLL | IORING_SETUP_SQPOLL |
 			IORING_SETUP_SQ_AFF | IORING_SETUP_CQSIZE |
