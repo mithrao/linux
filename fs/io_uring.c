@@ -366,9 +366,6 @@ struct io_ring_ctx {
 		unsigned		cached_cq_overflow;
 		unsigned long		sq_check_overflow;
 
-		/* hashed buffered write serialization */
-		struct io_wq_hash	*hash_map;
-
 		struct list_head	defer_list;
 		struct list_head	timeout_list;
 		struct list_head	cq_overflow_list;
@@ -384,9 +381,6 @@ struct io_ring_ctx {
 	struct io_submit_state		submit_state;
 
 	struct io_rings	*rings;
-
-	/* Only used for accounting purposes */
-	struct mm_struct	*mm_account;
 
 	const struct cred	*sq_creds;	/* cred used for __io_sq_thread() */
 	struct io_sq_data	*sq_data;	/* if using sq thread polling */
@@ -409,15 +403,6 @@ struct io_ring_ctx {
 		/* bpf programs */
 	struct io_bpf_prog	*bpf_progs;
 	unsigned 			nr_bpf_progs;
-
-
-	struct user_struct	*user;
-
-	struct completion	ref_comp;
-
-#if defined(CONFIG_UNIX)
-	struct socket		*ring_sock;
-#endif
 
 	struct xarray		io_buffers;
 
@@ -461,14 +446,27 @@ struct io_ring_ctx {
 
 	struct io_restriction		restrictions;
 
-	/* exit task_work */
-	struct callback_head		*exit_task_work;
-
 	struct wait_queue_head		hash_wait;
 
 	/* Keep this last, we don't need it for the fast path */
-	struct work_struct		exit_work;
-	struct list_head		tctx_list;
+	struct {
+		#if define(CONFIG_UNIX)
+			struct socket 		*ring_sock;
+		#endif
+		/* hashed buffer write serialization */
+		struct io_wq_hash		*hash_map;
+
+		/* only used for accounting purpose */
+		struct user_struct		*user;
+		struct mm_struct 		*mm_account;
+
+		/* ctx exit and cancelation */
+		struct callback_head	*exit_task_work;
+		struct work_struct 		exit_work;
+		struct list_head		tctx_list;
+		struct completion		ref_comp;
+
+	}
 };
 
 struct io_uring_task {
