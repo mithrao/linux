@@ -106,6 +106,7 @@
 #define IORING_MAX_FIXED_FILES	(64 * IORING_MAX_FILES_TABLE)
 #define IORING_MAX_RESTRICTIONS	(IORING_RESTRICTION_LAST + \
 				 IORING_REGISTER_LAST + IORING_OP_LAST)
+#define IORING_MAX_BPF_PROGS 	100
 
 #define SQE_VALID_FLAGS	(IOSQE_FIXED_FILE|IOSQE_IO_DRAIN|IOSQE_IO_LINK|	\
 				IOSQE_IO_HARDLINK | IOSQE_ASYNC | \
@@ -341,7 +342,6 @@ struct io_cqring {
 
 struct io_bpf_ctx {
 	struct io_ring_ctx		*ctx;
-	struct io_submit_link	link;
 };
 
 struct io_ring_ctx {
@@ -409,9 +409,9 @@ struct io_ring_ctx {
 	unsigned		nr_user_bufs;
 	struct io_mapped_ubuf	*user_bufs;
 
-		/* bpf programs */
-	struct io_bpf_prog	*bpf_progs;
+	/* bpf programs */
 	unsigned 			nr_bpf_progs;
+	struct io_bpf_prog	*bpf_progs;
 
 	struct xarray		io_buffers;
 
@@ -1030,8 +1030,7 @@ static const struct io_op_def io_op_defs[] = {
 	},
 	[IORING_OP_RENAMEAT] = {},
 	[IORING_OP_UNLINKAT] = {},
-	[IORING_OP_BPF] = {
-	}
+	[IORING_OP_BPF] = {},
 };
 
 static bool io_disarm_next(struct io_kiocb *req);
@@ -1075,7 +1074,7 @@ static void io_req_task_queue(struct io_kiocb *req);
 static void io_submit_flush_completions(struct io_comp_state *cs,
 					struct io_ring_ctx *ctx);
 
-static void io_bpf_run(struct io_kiocb *req);
+static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags);
 
 static struct kmem_cache *req_cachep;
 
@@ -4006,7 +4005,7 @@ static void io_bpf_run_task_work(struct callback_head *cb)
 	struct io_ring_ctx *ctx = req->ctx;
 
 	mutex_lock(&ctx->uring_lock);
-	io_bpf_run(req);
+	io_bpf_run(req, 0);
 	mutex_unlock(&ctx->uring_lock);
 }
 
@@ -8577,6 +8576,65 @@ static void io_req_caches_free(struct io_ring_ctx *ctx)
 	mutex_unlock(&ctx->uring_lock);
 }
 
+
+static int io_bpf_unregister(struct io_ring_ctx *ctx)
+{
+	int i;
+	if (!ctx->nr_bpf_progs)
+		return -ENXIO;
+
+	for (i = 0; i < ctx->nr_bpf_progs; ++i) {
+		struct bpf_prog *prog = ctx->bpf_progs[i].prog;
+		if (prog)
+			bpf_prog_put(prog);
+	}
+	kfree(ctx->bpf_progs);
+	ctx->bpf_progs = NULL;
+	ctx->nr_bpf_progs = 0;
+	return 0;
+}
+
+static int io_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
+							unsigned int nr_args)
+{
+	u32 __user *fds = arg;
+	int i, ret = 0;
+	
+	if (!nr_args || nr_args > IORING_MAX_BPF_PROGS) 
+		return -EINVAL;
+	if (ctx->nr_bpf_progs)
+		return -EBUSY;
+	
+	ctx->bpf_progs = kcalloc(nr_args, sizeof(ctx->bpf_progs[0]), 
+							GFP_KERNEL);
+
+	if (!ctx->bpf_progs)
+		return -ENOMEM;
+	
+	for (i = 0; i < nr_args; ++i) {
+		struct bpf_prog *prog;
+		u32 fd;
+
+		if (copy_from_user(&fd, &fds[i], sizeof(fd))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (fd == -1)
+			continue;
+		
+		prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_IOURING);
+		if (IS_ERR(prog)) {
+			ret = PTR_ERR(prog);
+			break;
+		}
+		ctx->bpf_progs[i].prog = prog;
+	}
+	ctx->nr_bpf_progs = i;
+	if (ret)
+		io_bpf_unregister(ctx);
+	return ret;
+}
+
 static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 {
 	unsigned int i;
@@ -8604,6 +8662,7 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 	mutex_unlock(&ctx->uring_lock);
 	io_eventfd_unregister(ctx);
 	io_destroy_buffers(ctx);
+	io_bpf_unregister(ctx);
 
 #if defined(CONFIG_UNIX)
 	if (ctx->ring_sock) {
@@ -8626,63 +8685,6 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 		io_wq_put_hash(ctx->hash_map);
 	kfree(ctx->cancel_hash);
 	kfree(ctx);
-}
-
-static int io_bpf_detach(struct io_ring_ctx *ctx)
-{
-	int i;
-	if (!ctx->nr_bpf_progs)
-		return -ENXIO;
-
-	for (i = 0; i < ctx->nr_bpf_progs; ++i) {
-		struct bpf_prog *prog = ctx->bpf_progs[i].prog;
-		if (prog)
-			bpf_prog_put(prog);
-	}
-	kfree(ctx->bpf_progs);
-	ctx->bpf_progs = NULL;
-	ctx->nr_bpf_progs = 0;
-	return 0;
-}
-
-static int io_bpf_attach(struct io_ring_ctx *ctx, void __user *arg,
-							unsigned int nr_args)
-{
-	u32 __user *fds = arg;
-	int i, ret = 0;
-	
-	if (!nr_args || nr_args > 100) 
-		return -EINVAL;
-	if (ctx->nr_bpf_progs)
-		return -EBUSY;
-	
-	ctx->bpf_progs = kcalloc(nr_args, sizeof(ctx->bpf_progs[0]), GFP_KERNEL);
-
-	if (!ctx->bpf_progs)
-		return -ENOMEM;
-	
-	for (i = 0; i < nr_args; ++i) {
-		struct bpf_prog *prog;
-		u32 fd;
-
-		if (copy_from_user(&fd, &fds[i], sizeof(fd))) {
-			ret = -EFAULT;
-			break;
-		}
-		if (fd == -1)
-			continue;
-		
-		prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_IOURING);
-		if (IS_ERR(prog)) {
-			ret = PTR_ERR(prog);
-			break;
-		}
-		ctx->bpf_progs[i].prog = prog;
-	}
-	ctx->nr_bpf_progs = i;
-	if (ret)
-		io_bpf_detach(ctx);
-	return ret;
 }
 
 static __poll_t io_uring_poll(struct file *file, poll_table *wait)
@@ -9263,6 +9265,7 @@ static void *io_uring_validate_mmap_request(struct file *file,
 	struct io_ring_ctx *ctx = file->private_data;
 	loff_t offset = pgoff << PAGE_SHIFT;
 	struct page *page;
+	unsigned long cq_idx;
 	void *ptr;
 
 	switch (offset) {
@@ -9275,6 +9278,15 @@ static void *io_uring_validate_mmap_request(struct file *file,
 		break;
 	default:
 		return ERR_PTR(-EINVAL);
+		if (offset < IORING_OFF_CQ_RING_EXTRA)
+			return ERR_PTR(-EINVAL);
+		offset -= IORING_OFF_CQ_RING_EXTRA;
+		if (offset % IORING_STRID_CQ_RING)
+			return ERR_PTR(-EINVAL);
+		cq_idx = offset / IORING_STRID_CQ_RING; /* find the cq to mmap */
+		if (cq_idx >= ctx->cq_nr)
+			return ERR_PTR(-EINVAL);
+		ptr = ctx->cqs[cq_idx].rings;
 	}
 
 	page = virt_to_head_page(ptr);
@@ -9672,6 +9684,8 @@ static int io_allocate_scq_urings(struct io_ring_ctx *ctx,
 	return 0;
 
 err:
+	while (ctx->cq_nr > 1)
+		io_mem_free(ctx->cqs[--ctx->cq_nr].rings);
 	io_mem_free(ctx->rings);
 	ctx->rings = NULL;
 	return ret;
@@ -10146,14 +10160,14 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 	case IORING_REGISTER_RESTRICTIONS:
 		ret = io_register_restrictions(ctx, arg, nr_args);
 		break;
-	case IORING_ATTACH_BPF:
-		ret = io_bpf_attach(ctx, arg, nr_args);
+	case IORING_REGISTER_BPF:
+		ret = io_bpf_register(ctx, arg, nr_args);
 		break;
-	case IORING_DETACH_BPF:
+	case IORING_UNREGISTER_BPF:
 		ret = -EINVAL;
 		if (arg || nr_args)
 			break;
-		ret = io_bpf_detach(ctx);
+		ret = io_bpf_unregister(ctx);
 		break;
 	default:
 		ret = -EINVAL;
@@ -10199,19 +10213,35 @@ fail_req:
 	return ret;
 }
 
-BPF_CALL_3(bpf_io_uring_queue_sqe, void *, ctx, const void *, psqe, u32, len)
+/**
+ * a BPF request to submit a new io_uring request
+*/
+BPF_CALL_3(io_bpf_queue_sqe, struct io_bpf_ctx *, bpf_ctx,
+			const struct io_uring_sqe *, 		  sqe,
+			u32, 								  sqe_len)
 {
-	const struct io_uring_sqe *sqe = psqe;
-	struct io_bpf_ctx *bpf_ctx = ctx;
+	struct io_ring_ctx *ctx = bpf_ctx->ctx;
+	struct io_kiocb *req;
 
-	if (len != sizeof(struct io_uring_sqe))
+	if (sqe_len != sizeof(struct io_uring_sqe))
 		return -EINVAL;
 	
-	return io_bpf_prep_req(bpf_ctx, sqe);
+	req = io_alloc_req(ctx);
+	if (unlikely(!req))
+		return -ENOMEM;
+	if (!percpu_ref_tryget_many(&ctx->refs, 1)) {
+		kmem_cache_free(req_cachep, req);
+		return -EAGAIN;
+	}
+	percpu_counter_add(&current->io_uring->inflight, 1);
+	refcount_add(1, &current->usage);
+
+	/* returns number of submitted SQEs or an error */
+	return !io_submit_sqe(ctx, req, sqe);
 }
 
 const struct bpf_func_proto bpf_io_uring_queue_sqe_proto = {
-	.func = bpf_io_uring_queue_sqe,
+	.func = io_bpf_queue_sqe,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 	.arg1_type = ARG_PTR_TO_CTX,
@@ -10224,7 +10254,7 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
 		case BPF_FUNC_iouring_queue_sqe:
-			return &bpf_io_uring_queue_sqe_proto;
+			return prog->aux->sleepable ? &bpf_io_uring_queue_sqe_proto : NULL;
 		default:
 			return bpf_base_func_proto(func_id);
 	}
@@ -10238,35 +10268,41 @@ static bool io_bpf_is_valid_access(int off, int size,
 	return false;
 }
 
-const struct bpf_prog_ops bpf_io_prog_ops = {};
+const struct bpf_prog_ops bpf_io_uring_prog_ops = {};
 
 const struct bpf_verifier_ops bpf_io_uring_verifier_ops = {
 	.get_func_proto		= io_bpf_func_proto,
 	.is_valid_access	= io_bpf_is_valid_access,
 };
 
-static void io_bpf_run(struct io_kiocb *req)
+static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 {
-	struct io_ring_ctx *ctx = req->ctx;
+	struct io_ring_ctx  *ctx = req->ctx;
 	struct io_bpf_ctx	bpf_ctx;
+	struct bpf_prog		*prog;
+	int ret = 			-EAGAIN;
 
 	lockdep_assert_held(&req->ctx->uring_lock);
 
-	if (unlikely(percpu_ref_is_dying(&ctx->refs))) {
-		io_req_complete(req, -EAGAIN);
-		return;
-	}
+	if (unlikely(percpu_ref_is_dying(&ctx->refs) || 
+				atomic_read(&req->task->io_uring->in_idle))) 
+		goto done;
+
+	bpf_ctx.ctx = ctx;
+	prog = req->bpf.prog;
 
 	io_submit_state_start(&ctx->submit_state, 1);
-	bpf_ctx.ctx = ctx;
-	bpf_ctx.link.head = NULL;
-
-	BPF_PROG_RUN(req->bpf.prog, &bpf_ctx);
-	// if (bpf_ctx.link.head)
-	// 	io_queue_link_head(bpf_ctx.link.head);
+	if (prog->aux->sleepable) {
+		rcu_read_lock();
+		bpf_prog_run_pin_on_cpu(req->bpf.prog, &bpf_ctx);
+		rcu_read_unlock();
+	} else {
+		bpf_prog_run_pin_on_cpu(req->bpf.prog, &bpf_ctx);
+	}
 	io_submit_state_end(&ctx->submit_state, ctx);
-
-	io_req_complete(req, 0);
+	ret = 0;
+done:
+	__io_req_complete(req, issue_flags, ret, 0);
 }
 
 SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,
