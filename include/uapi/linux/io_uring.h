@@ -58,6 +58,7 @@ struct io_uring_sqe {
 			/* personality to use, if used */
 			__u16	personality;
 			__s32	splice_fd_in;
+			__u16   cq_idx;
 		};
 		__u64	__pad2[3];
 	};
