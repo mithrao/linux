@@ -362,7 +362,6 @@ struct io_ring_ctx {
 		unsigned		sq_entries;
 		unsigned		sq_thread_idle;
 		unsigned		cached_sq_dropped;
-		unsigned		cached_cq_overflow;
 		unsigned long		sq_check_overflow;
 
 		struct list_head	defer_list;
@@ -447,11 +446,11 @@ struct io_ring_ctx {
 		struct llist_head		rsrc_put_llist;
 		struct list_head		rsrc_ref_list;
 		spinlock_t				rsrc_ref_lock;
-	}
+	};
 
 	/* Keep this last, we don't need it for the fast path */
 	struct {
-		#if define(CONFIG_UNIX)
+		#if defined(CONFIG_UNIX)
 			struct socket 		*ring_sock;
 		#endif
 		/* hashed buffer write serialization */
@@ -466,8 +465,7 @@ struct io_ring_ctx {
 		struct work_struct 		exit_work;
 		struct list_head		tctx_list;
 		struct completion		ref_comp;
-
-	}
+	};
 };
 
 struct io_uring_task {
@@ -1202,13 +1200,19 @@ err:
 	return NULL;
 }
 
+// ????
+static void io_account_cq_overflow(struct io_ring_ctx *ctx)
+{
+	struct io_rings *r = ctx->rings;
+	WRITE_ONCE(r->cq_overflow, READ_ONCE(r->cq_overflow) + 1);
+}
+
 static bool req_need_defer(struct io_kiocb *req, u32 seq)
 {
 	if (unlikely(req->flags & REQ_F_IO_DRAIN)) {
 		struct io_ring_ctx *ctx = req->ctx;
 
-		return seq != ctx->cached_cq_tail
-				+ READ_ONCE(ctx->cached_cq_overflow);
+		return seq != ctx->cached_cq_tail;
 	}
 
 	return false;
@@ -1454,9 +1458,7 @@ static bool __io_cqring_overflow_flush(struct io_ring_ctx *ctx, bool force,
 			WRITE_ONCE(cqe->res, req->result);
 			WRITE_ONCE(cqe->flags, req->compl.cflags);
 		} else {
-			ctx->cached_cq_overflow++;
-			WRITE_ONCE(ctx->rings->cq_overflow,
-				   ctx->cached_cq_overflow);
+			io_account_cq_overflow(ctx);
 		}
 		posted = true;
 	}
@@ -1525,8 +1527,7 @@ static void __io_cqring_fill_event(struct io_kiocb *req, long res, long cflags)
 		 * then we cannot store the request for later flushing, we need
 		 * to drop it on the floor.
 		 */
-		ctx->cached_cq_overflow++;
-		WRITE_ONCE(ctx->rings->cq_overflow, ctx->cached_cq_overflow);
+		io_account_cq_overflow(ctx);
 	} else {
 		if (list_empty(&ctx->cq_overflow_list)) {
 			set_bit(0, &ctx->sq_check_overflow);
