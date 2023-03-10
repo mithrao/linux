@@ -439,14 +439,17 @@ struct io_ring_ctx {
 		struct list_head	inflight_list;
 	} ____cacheline_aligned_in_smp;
 
-	struct delayed_work		rsrc_put_work;
-	struct llist_head		rsrc_put_llist;
-	struct list_head		rsrc_ref_list;
-	spinlock_t			rsrc_ref_lock;
-
 	struct io_restriction		restrictions;
 
 	struct wait_queue_head		hash_wait;
+
+	/* slow path rsrc auxilary data, used by update/register */
+	struct {
+		struct delayed_work		rsrc_put_work;
+		struct llist_head		rsrc_put_llist;
+		struct list_head		rsrc_ref_list;
+		spinlock_t				rsrc_ref_lock;
+	}
 
 	/* Keep this last, we don't need it for the fast path */
 	struct {
@@ -1352,7 +1355,7 @@ static inline bool io_sqring_full(struct io_ring_ctx *ctx)
 {
 	struct io_rings *r = ctx->rings;
 
-	return READ_ONCE(r->sq.tail) - ctx->cached_sq_head == r->sq_ring_entries;
+	return READ_ONCE(r->sq.tail) - ctx->cached_sq_head == ctx->sq_entries;
 }
 
 static inline unsigned int __io_cqring_events(struct io_ring_ctx *ctx)
@@ -1370,7 +1373,7 @@ static struct io_uring_cqe *io_get_cqring(struct io_ring_ctx *ctx)
 	 * control dependency is enough as we're using WRITE_ONCE to
 	 * fill the cq entry
 	 */
-	if (__io_cqring_events(ctx) == rings->cq_ring_entries)
+	if (__io_cqring_events(ctx) == ctx->sq_entries)
 		return NULL;
 
 	tail = ctx->cached_cq_tail++;
@@ -1427,14 +1430,13 @@ static bool __io_cqring_overflow_flush(struct io_ring_ctx *ctx, bool force,
 				       struct task_struct *tsk,
 				       struct files_struct *files)
 {
-	struct io_rings *rings = ctx->rings;
 	struct io_kiocb *req, *tmp;
 	struct io_uring_cqe *cqe;
 	unsigned long flags;
 	bool all_flushed, posted;
 	LIST_HEAD(list);
 
-	if (!force && __io_cqring_events(ctx) == rings->cq_ring_entries)
+	if (!force && __io_cqring_events(ctx) == ctx->cq_entries)
 		return false;
 
 	posted = false;
