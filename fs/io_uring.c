@@ -84,7 +84,6 @@
 #include <trace/events/io_uring.h>
 
 #include <uapi/linux/io_uring.h>
-#include <uapi/linux/bpf.h>
 
 #include "internal.h"
 #include "io-wq.h"
@@ -10193,35 +10192,6 @@ out_quiesce:
 	return ret;
 }
 
-static int io_bpf_prep_req(struct io_bpf_ctx *bpf_ctx, 
-							const struct io_uring_sqe *sqe)
-{
-	struct io_ring_ctx *ctx = bpf_ctx->req->ctx;
-	struct io_kiocb    *req = io_alloc_req(ctx);
-	int ret;
-
-	if (unlikely(!req))
-		return -ENOMEM;
-	if (!percpu_ref_tryget_many(&ctx->refs, 1)) {
-		kmem_cache_free(req_cachep, req);
-		return -EAGAIN;
-	}
-	percpu_counter_add(&current->io_uring->inflight, 1);
-	refcount_add(1, &current->usage);
-
-	ret = io_init_req(ctx, req, sqe);
-	if (unlikely(ret))
-		goto fail_req;
-
-	ret = io_submit_sqe(ctx, req, sqe);
-	if (!ret)
-		return 0;
-
-fail_req:
-	io_double_put_req(req);
-	return ret;
-}
-
 /**
  * a BPF request to submit a new io_uring request
 */
@@ -10292,6 +10262,7 @@ BPF_CALL_5(io_bpf_emit_cqe, struct io_bpf_ctx *, bpf_ctx,
 							u32, 				 flags)
 {
 	struct io_ring_ctx *ctx = bpf_ctx->req->ctx;
+	bpf_ctx->req->user_data = user_data;
 
 	if (unlikely(cq_idx >= ctx->cq_nr))
 		return -EINVAL;
@@ -10397,14 +10368,14 @@ static int io_bpf_wait_func(struct wait_queue_entry *wqe, unsigned mode,
 								int sync, void *key)
 {
 	struct io_async_bpf *abpf = container_of(wqe, struct io_async_bpf, wqe);
-	bool wake = io_bpf_need_wake(abpf);
-	if (wake) {
+	if (io_bpf_need_wake(abpf)) {
 		list_del_init_careful(&wqe->entry);
 		/* req_ref_get(wqe->private); ==> so such function */
 		percpu_ref_get(wqe->private);
 		io_queue_async_work(wqe->private);
+		return true;
 	}
-	return wake;
+	return false;
 }
 
 static int io_bpf_wait_cq_async(struct io_kiocb *req, unsigned int nr,
@@ -10451,6 +10422,7 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 
 	memset(&bpf_ctx.u, 0, sizeof(bpf_ctx.u));
 	bpf_ctx.u.user_data = req->user_data;
+	memset(&bpf_ctx.req, 0, sizeof(bpf_ctx.req));
 	bpf_ctx.req = req;
 	prog = req->bpf.prog;
 
