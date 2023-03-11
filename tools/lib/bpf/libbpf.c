@@ -13,6 +13,10 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+
+/* hack, use local headers instead of system-wide */
+#include "../../../include/uapi/linux/bpf.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -8630,6 +8634,9 @@ static const struct bpf_sec_def section_defs[] = {
 	BPF_PROG_SEC("struct_ops",		BPF_PROG_TYPE_STRUCT_OPS),
 	BPF_EAPROG_SEC("sk_lookup/",		BPF_PROG_TYPE_SK_LOOKUP,
 						BPF_SK_LOOKUP),
+	SEC_DEF("iouring/",			IOURING),
+	SEC_DEF("iouring.s/", 
+			.is_sleepable = true),
 };
 
 #undef BPF_PROG_SEC_IMPL
