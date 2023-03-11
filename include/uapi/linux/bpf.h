@@ -4084,6 +4084,7 @@ union bpf_attr {
 	FN(check_mtu),			\
 	FN(iouring_queue_sqe),	\
 	FN(iouring_emit_cqe),   \
+	FN(iouring_reap_cqe),	\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper

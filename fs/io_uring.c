@@ -10239,6 +10239,42 @@ BPF_CALL_3(io_bpf_queue_sqe, struct io_bpf_ctx *, bpf_ctx,
 	return !io_submit_sqe(ctx, req, sqe);
 }
 
+BPF_CALL_4(io_bpf_reap_cqe, struct io_bpf_ctx *, 	bpf_ctx,
+							u32, 				 	cq_idx,
+							struct io_uring_cqe *, 	cqe_out,
+							u32, 					cqe_len)
+{
+	struct io_ring_ctx *ctx = bpf_ctx->req->ctx;
+	struct io_uring_cqe *cqe;
+	struct io_cqring *cq;
+	struct io_rings *r;
+	unsigned tail, head, mask;
+	int ret = -EINVAL;
+
+	if (unlikely(cqe_len != sizeof(*cqe_out)))
+		goto err;
+	if (unlikely(cq_idx >= ctx->cq_nr))
+		goto err;
+	
+	cq = &ctx->cqs[cq_idx];
+	r = cq->rings;
+	tail = READ_ONCE(r->cq.tail);
+	head = smp_load_acquire(&r->cq.head);
+
+	ret = -ENOENT;
+	if (unlikely(tail == head))
+		goto err;
+	
+	mask = cq->entries - 1;
+	cqe = &r->cqes[head & mask];
+	memcpy(cqe_out, cqe, sizeof(*cqe_out));
+	WRITE_ONCE(r->cq.head, head + 1);
+	return 0;
+err:
+	memset(cqe_out, 0, sizeof(*cqe_out));
+	return ret;
+}
+
 BPF_CALL_5(io_bpf_emit_cqe, struct io_bpf_ctx *, bpf_ctx,
 							u32, 				 cq_idx,
 							u64, 				 user_data,
@@ -10278,6 +10314,16 @@ const struct bpf_func_proto io_bpf_emit_cqe_proto = {
 	.arg5_type = ARG_ANYTHING,
 };
 
+const struct bpf_func_proto io_bpf_reap_cqe_proto = {
+	.func = io_bpf_reap_cqe,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_ANYTHING,
+	.arg3_type = ARG_PTR_TO_UNINIT_MEM,
+	.arg4_type = ARG_CONST_SIZE,
+};
+
 static const struct bpf_func_proto * 
 io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
@@ -10289,6 +10335,8 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 			return prog->aux->sleepable ? &io_bpf_queue_sqe_proto : NULL;
 		case BPF_FUNC_iouring_emit_cqe:
 			return &io_bpf_emit_cqe_proto;
+		case BPF_FUNC_iouring_reap_cqe:
+			return &io_bpf_reap_cqe_proto;
 		default:
 			return bpf_base_func_proto(func_id);
 	}
