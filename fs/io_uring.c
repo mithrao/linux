@@ -10342,11 +10342,20 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	}
 }
 
-static bool io_bpf_is_valid_access(int off, int size, 
-									enum bpf_access_type type,
-									const struct bpf_prog *prog,
-									struct bpf_insn_access_aux *info)
+static bool io_bpf_is_valid_access(int off, int size,
+							enum bpf_access_type type,
+							const struct bpf_prog *prog,
+							struct bpf_insn_access_aux *info)
 {
+	if (off < 0 || off >= sizeof(struct io_kiocb))
+		return false;
+	if (off % size != 0)
+		return false;
+	
+	switch (off) {
+		case offsetof(struct io_kiocb, user_data):
+			return size == sizeof_field(struct io_kiocb, user_data);
+	}
 	return false;
 }
 
@@ -10370,6 +10379,7 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 				atomic_read(&req->task->io_uring->in_idle))) 
 		goto done;
 
+	memset(&bpf_ctx.req, 0, sizeof(bpf_ctx.req));
 	bpf_ctx.req = req;
 	prog = req->bpf.prog;
 
@@ -10455,6 +10465,10 @@ static int __init io_uring_init(void)
 	BUILD_BUG_SQE_ELEM(42, __u16,  personality);
 	BUILD_BUG_SQE_ELEM(44, __s32,  splice_fd_in);
 	BUILD_BUG_SQE_ELEM(48, __u16, cq_idx);
+
+	/* shoud be first, see io_bpf_is_valid_access() */
+	__BUILD_BUG_VERIFY_ELEMENT(struct io_bpf_ctx, 0,
+								struct io_kiocb, req);
 
 	BUILD_BUG_ON(ARRAY_SIZE(io_op_defs) != IORING_OP_LAST);
 	BUILD_BUG_ON(__REQ_F_LAST_BIT >= 8 * sizeof(int));
