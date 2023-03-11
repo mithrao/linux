@@ -84,6 +84,7 @@
 #include <trace/events/io_uring.h>
 
 #include <uapi/linux/io_uring.h>
+#include <uapi/linux/bpf.h>
 
 #include "internal.h"
 #include "io-wq.h"
@@ -341,6 +342,7 @@ struct io_cqring {
 };
 
 struct io_bpf_ctx {
+	struct io_uring_bpf_ctx u;
 	struct io_kiocb			*req;
 };
 
@@ -675,6 +677,12 @@ struct io_unlink {
 struct io_bpf {
 	struct file		*file;
 	struct bpf_prog *prog;
+};
+
+struct io_async_bpf {
+	struct wait_queue_entry	wqe;
+	unsigned int 			wait_nr;
+	unsigned int 			wait_idx;
 };
 
 struct io_completion {
@@ -1030,7 +1038,9 @@ static const struct io_op_def io_op_defs[] = {
 	},
 	[IORING_OP_RENAMEAT] = {},
 	[IORING_OP_UNLINKAT] = {},
-	[IORING_OP_BPF] = {},
+	[IORING_OP_BPF] = {
+		.async_size		 = sizeof(struct io_async_bpf),
+	},
 };
 
 static bool io_disarm_next(struct io_kiocb *req);
@@ -7008,7 +7018,7 @@ static int io_wake_function(struct wait_queue_entry *curr, unsigned int mode,
 	 */
 	if (io_should_wake(iowq) || test_bit(0, &iowq->ctx->cq_check_overflow))
 		return autoremove_wake_function(curr, mode, wake_flags, key);
-	return -1;
+	return 0;
 }
 
 static int io_run_task_work_sig(void)
@@ -7099,8 +7109,7 @@ static int io_cqring_wait(struct io_ring_ctx *ctx, int min_events,
 			ret = -EBUSY;
 			break;
 		}
-		prepare_to_wait_exclusive(&ctx->wait, &iowq.wq,
-						TASK_INTERRUPTIBLE);
+		prepare_to_wait(&ctx->wait, &iowq.wq, TASK_INTERRUPTIBLE);
 		ret = io_cqring_wait_schedule(ctx, &iowq, &timeout);
 		finish_wait(&ctx->wait, &iowq.wq);
 		cond_resched();
@@ -8996,6 +9005,7 @@ static void io_uring_try_cancel_requests(struct io_ring_ctx *ctx,
 			}
 		}
 
+		wake_up_all(&ctx->wait);
 		ret |= io_cancel_defer_files(ctx, task, files);
 		ret |= io_poll_remove_all(ctx, task, files);
 		ret |= io_kill_timeouts(ctx, task, files);
@@ -10329,8 +10339,10 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
 		// cannot define case: bpf_copy_from_user_proto
-		// case BPF_FUNC_copy_from_user:
-		// 	return prog->aux->sleepable ? &bpf_copy_from_user_proto : NULL;
+		case BPF_FUNC_copy_from_user:
+			return prog->aux->sleepable ? &bpf_copy_from_user_proto : NULL;
+		case BPF_FUNC_copy_to_user:
+			return prog->aux->sleepable ? &bpf_copy_to_user_proto : NULL;
 		case BPF_FUNC_iouring_queue_sqe:
 			return prog->aux->sleepable ? &io_bpf_queue_sqe_proto : NULL;
 		case BPF_FUNC_iouring_emit_cqe:
@@ -10347,14 +10359,18 @@ static bool io_bpf_is_valid_access(int off, int size,
 							const struct bpf_prog *prog,
 							struct bpf_insn_access_aux *info)
 {
-	if (off < 0 || off >= sizeof(struct io_kiocb))
+	if (off < 0 || off >= sizeof(struct io_uring_bpf_ctx))
 		return false;
 	if (off % size != 0)
 		return false;
 	
 	switch (off) {
-		case offsetof(struct io_kiocb, user_data):
-			return size == sizeof_field(struct io_kiocb, user_data);
+		case offsetof(struct io_uring_bpf_ctx, user_data):
+			return size == sizeof_field(struct io_uring_bpf_ctx, user_data);
+		case offsetof(struct io_uring_bpf_ctx, wait_nr):
+			return size == sizeof_field(struct io_uring_bpf_ctx, wait_nr);
+		case offsetof(struct io_uring_bpf_ctx, wait_idx):
+			return size == sizeof_field(struct io_uring_bpf_ctx, wait_idx);
 	}
 	return false;
 }
@@ -10366,6 +10382,60 @@ const struct bpf_verifier_ops bpf_io_uring_verifier_ops = {
 	.is_valid_access	= io_bpf_is_valid_access,
 };
 
+static inline bool io_bpf_need_wake(struct io_async_bpf *abpf)
+{
+	struct io_kiocb *req = abpf->wqe.private;
+	struct io_ring_ctx *ctx = req->ctx;
+
+	if (unlikely(percpu_ref_is_dying(&ctx->refs)) || 
+				atomic_read(&req->task->io_uring->in_idle))
+		return true;
+	return __io_cqring_events(&ctx->cqs[abpf->wait_idx]) >= abpf->wait_nr;
+}
+
+static int io_bpf_wait_func(struct wait_queue_entry *wqe, unsigned mode,
+								int sync, void *key)
+{
+	struct io_async_bpf *abpf = container_of(wqe, struct io_async_bpf, wqe);
+	bool wake = io_bpf_need_wake(abpf);
+	if (wake) {
+		list_del_init_careful(&wqe->entry);
+		/* req_ref_get(wqe->private); ==> so such function */
+		percpu_ref_get(wqe->private);
+		io_queue_async_work(wqe->private);
+	}
+	return wake;
+}
+
+static int io_bpf_wait_cq_async(struct io_kiocb *req, unsigned int nr,
+								unsigned int idx)
+{
+	struct io_ring_ctx *ctx = req->ctx;
+	struct wait_queue_head *wq;
+	struct wait_queue_entry *wqe;
+	struct io_async_bpf *abpf;
+
+	if (unlikely(idx >= ctx->cq_nr))
+		return -EINVAL;
+	if (!req->async_data && io_alloc_async_data(req))
+		return -ENOMEM;
+		
+	abpf = req->async_data;
+	abpf->wait_nr = nr;
+	abpf->wait_idx = idx;
+	wqe = &abpf->wqe;
+	init_waitqueue_func_entry(wqe, io_bpf_wait_func);
+	wqe->private = req;
+	wq = &ctx->wait;
+
+	spin_lock_irq(&wq->lock);
+	__add_wait_queue(wq, wqe);
+	smp_mb();
+	io_bpf_wait_func(wqe, 0, 0, NULL);
+	spin_unlock_irq(&wq->lock);
+	return 0;
+}
+
 static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_ring_ctx  *ctx = req->ctx;
@@ -10375,11 +10445,12 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 
 	lockdep_assert_held(&req->ctx->uring_lock);
 
-	if (unlikely(percpu_ref_is_dying(&ctx->refs) || 
-				atomic_read(&req->task->io_uring->in_idle))) 
+	if (unlikely(percpu_ref_is_dying(&ctx->refs)) || 
+				atomic_read(&req->task->io_uring->in_idle))
 		goto done;
 
-	memset(&bpf_ctx.req, 0, sizeof(bpf_ctx.req));
+	memset(&bpf_ctx.u, 0, sizeof(bpf_ctx.u));
+	bpf_ctx.u.user_data = req->user_data;
 	bpf_ctx.req = req;
 	prog = req->bpf.prog;
 
@@ -10393,6 +10464,13 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 	}
 	io_submit_state_end(&ctx->submit_state, ctx);
 	ret = 0;
+
+	if (bpf_ctx.u.wait_nr) {
+		ret = io_bpf_wait_cq_async(req, bpf_ctx.u.wait_nr,
+								bpf_ctx.u.wait_idx);
+		if (!ret)
+			return;
+	}
 done:
 	__io_req_complete(req, issue_flags, ret, 0);
 }
@@ -10468,7 +10546,7 @@ static int __init io_uring_init(void)
 
 	/* shoud be first, see io_bpf_is_valid_access() */
 	__BUILD_BUG_VERIFY_ELEMENT(struct io_bpf_ctx, 0,
-								struct io_kiocb, req);
+								struct io_uring_bpf_ctx, u);
 
 	BUILD_BUG_ON(ARRAY_SIZE(io_op_defs) != IORING_OP_LAST);
 	BUILD_BUG_ON(__REQ_F_LAST_BIT >= 8 * sizeof(int));
