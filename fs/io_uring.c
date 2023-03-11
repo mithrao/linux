@@ -7009,7 +7009,7 @@ static int io_wake_function(struct wait_queue_entry *curr, unsigned int mode,
 	 */
 	if (io_should_wake(iowq) || test_bit(0, &iowq->ctx->cq_check_overflow))
 		return autoremove_wake_function(curr, mode, wake_flags, key);
-	return -1;
+	return 0;
 }
 
 static int io_run_task_work_sig(void)
@@ -7100,7 +7100,7 @@ static int io_cqring_wait(struct io_ring_ctx *ctx, int min_events,
 			ret = -EBUSY;
 			break;
 		}
-		prepare_to_wait_exclusive(&ctx->wait, &iowq.wq,
+		prepare_to_wait(&ctx->wait, &iowq.wq,
 						TASK_INTERRUPTIBLE);
 		ret = io_cqring_wait_schedule(ctx, &iowq, &timeout);
 		finish_wait(&ctx->wait, &iowq.wq);
@@ -10330,8 +10330,12 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
 		// cannot define case: bpf_copy_from_user_proto
-		// case BPF_FUNC_copy_from_user:
-		// 	return prog->aux->sleepable ? &bpf_copy_from_user_proto : NULL;
+		/*
+		case BPF_FUNC_copy_from_user:
+			return prog->aux->sleepable ? &bpf_copy_from_user_proto : NULL;
+		case BPF_FUNC_copy_to_user:
+			return prog->aux->sleepable ? &bpf_copy_to_user_proto : NULL;
+		*/
 		case BPF_FUNC_iouring_queue_sqe:
 			return prog->aux->sleepable ? &io_bpf_queue_sqe_proto : NULL;
 		case BPF_FUNC_iouring_emit_cqe:
