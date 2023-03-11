@@ -341,7 +341,7 @@ struct io_cqring {
 };
 
 struct io_bpf_ctx {
-	struct io_ring_ctx		*ctx;
+	struct io_kiocb			*req;
 };
 
 struct io_ring_ctx {
@@ -1231,7 +1231,6 @@ err:
 	return NULL;
 }
 
-// ????
 static void io_account_cq_overflow(struct io_ring_ctx *ctx)
 {
 	struct io_rings *r = ctx->rings;
@@ -10187,7 +10186,7 @@ out_quiesce:
 static int io_bpf_prep_req(struct io_bpf_ctx *bpf_ctx, 
 							const struct io_uring_sqe *sqe)
 {
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
+	struct io_ring_ctx *ctx = bpf_ctx->req->ctx;
 	struct io_kiocb    *req = io_alloc_req(ctx);
 	int ret;
 
@@ -10220,7 +10219,7 @@ BPF_CALL_3(io_bpf_queue_sqe, struct io_bpf_ctx *, bpf_ctx,
 			const struct io_uring_sqe *, 		  sqe,
 			u32, 								  sqe_len)
 {
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
+	struct io_ring_ctx *ctx = bpf_ctx->req->ctx;
 	struct io_kiocb *req;
 
 	if (sqe_len != sizeof(struct io_uring_sqe))
@@ -10240,7 +10239,26 @@ BPF_CALL_3(io_bpf_queue_sqe, struct io_bpf_ctx *, bpf_ctx,
 	return !io_submit_sqe(ctx, req, sqe);
 }
 
-const struct bpf_func_proto bpf_io_uring_queue_sqe_proto = {
+BPF_CALL_5(io_bpf_emit_cqe, struct io_bpf_ctx *, bpf_ctx,
+							u32, 				 cq_idx,
+							u64, 				 user_data,
+							s32, 				 res,
+							u32, 				 flags)
+{
+	struct io_ring_ctx *ctx = bpf_ctx->req->ctx;
+
+	if (unlikely(cq_idx >= ctx->cq_nr))
+		return -EINVAL;
+	
+	spin_lock_irq(&ctx->completion_lock);
+	io_cqring_fill_event(bpf_ctx->req, res, cq_idx);
+	io_commit_cqring(ctx);
+	spin_unlock_irq(&ctx->completion_lock);
+	io_cqring_ev_posted(ctx);
+	return 0;
+}
+
+const struct bpf_func_proto io_bpf_queue_sqe_proto = {
 	.func = io_bpf_queue_sqe,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
@@ -10249,12 +10267,28 @@ const struct bpf_func_proto bpf_io_uring_queue_sqe_proto = {
 	.arg3_type = ARG_CONST_SIZE,
 };
 
+const struct bpf_func_proto io_bpf_emit_cqe_proto = {
+	.func = io_bpf_emit_cqe,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_ANYTHING,
+	.arg3_type = ARG_ANYTHING,
+	.arg4_type = ARG_ANYTHING,
+	.arg5_type = ARG_ANYTHING,
+};
+
 static const struct bpf_func_proto * 
 io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
+		// cannot define case: bpf_copy_from_user_proto
+		// case BPF_FUNC_copy_from_user:
+		// 	return prog->aux->sleepable ? &bpf_copy_from_user_proto : NULL;
 		case BPF_FUNC_iouring_queue_sqe:
-			return prog->aux->sleepable ? &bpf_io_uring_queue_sqe_proto : NULL;
+			return prog->aux->sleepable ? &io_bpf_queue_sqe_proto : NULL;
+		case BPF_FUNC_iouring_emit_cqe:
+			return &io_bpf_emit_cqe_proto;
 		default:
 			return bpf_base_func_proto(func_id);
 	}
@@ -10288,7 +10322,7 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 				atomic_read(&req->task->io_uring->in_idle))) 
 		goto done;
 
-	bpf_ctx.ctx = ctx;
+	bpf_ctx.req = req;
 	prog = req->bpf.prog;
 
 	io_submit_state_start(&ctx->submit_state, 1);
