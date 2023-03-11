@@ -680,7 +680,7 @@ struct io_bpf {
 
 struct io_async_bpf {
 	struct wait_queue_entry	wqe;
-	unsigned int 			wait_nr;
+	unsigned int			wait_nr;
 	unsigned int 			wait_idx;
 };
 
@@ -7108,7 +7108,8 @@ static int io_cqring_wait(struct io_ring_ctx *ctx, int min_events,
 			ret = -EBUSY;
 			break;
 		}
-		prepare_to_wait(&ctx->wait, &iowq.wq, TASK_INTERRUPTIBLE);
+		prepare_to_wait(&ctx->wait, &iowq.wq,
+						TASK_INTERRUPTIBLE);
 		ret = io_cqring_wait_schedule(ctx, &iowq, &timeout);
 		finish_wait(&ctx->wait, &iowq.wq);
 		cond_resched();
@@ -10310,10 +10311,12 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
 		// cannot define case: bpf_copy_from_user_proto
+		/*
 		case BPF_FUNC_copy_from_user:
 			return prog->aux->sleepable ? &bpf_copy_from_user_proto : NULL;
 		case BPF_FUNC_copy_to_user:
 			return prog->aux->sleepable ? &bpf_copy_to_user_proto : NULL;
+		*/
 		case BPF_FUNC_iouring_queue_sqe:
 			return prog->aux->sleepable ? &io_bpf_queue_sqe_proto : NULL;
 		case BPF_FUNC_iouring_emit_cqe:
@@ -10358,19 +10361,19 @@ static inline bool io_bpf_need_wake(struct io_async_bpf *abpf)
 	struct io_kiocb *req = abpf->wqe.private;
 	struct io_ring_ctx *ctx = req->ctx;
 
-	if (unlikely(percpu_ref_is_dying(&ctx->refs)) || 
+	if (unlikely(percpu_ref_is_dying(&ctx->refs)) ||
 				atomic_read(&req->task->io_uring->in_idle))
 		return true;
 	return __io_cqring_events(&ctx->cqs[abpf->wait_idx]) >= abpf->wait_nr;
 }
 
 static int io_bpf_wait_func(struct wait_queue_entry *wqe, unsigned mode,
-								int sync, void *key)
+							int sync, void *key)
 {
 	struct io_async_bpf *abpf = container_of(wqe, struct io_async_bpf, wqe);
+
 	if (io_bpf_need_wake(abpf)) {
 		list_del_init_careful(&wqe->entry);
-		/* req_ref_get(wqe->private); ==> so such function */
 		percpu_ref_get(wqe->private);
 		io_queue_async_work(wqe->private);
 		return true;
@@ -10390,7 +10393,7 @@ static int io_bpf_wait_cq_async(struct io_kiocb *req, unsigned int nr,
 		return -EINVAL;
 	if (!req->async_data && io_alloc_async_data(req))
 		return -ENOMEM;
-		
+	
 	abpf = req->async_data;
 	abpf->wait_nr = nr;
 	abpf->wait_idx = idx;
@@ -10420,9 +10423,8 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 				atomic_read(&req->task->io_uring->in_idle))
 		goto done;
 
-	memset(&bpf_ctx.u, 0, sizeof(bpf_ctx.u));
+	memset(bpf_ctx.u.user_data, 0, sizeof(bpf_ctx.u));
 	bpf_ctx.u.user_data = req->user_data;
-	memset(&bpf_ctx.req, 0, sizeof(bpf_ctx.req));
 	bpf_ctx.req = req;
 	prog = req->bpf.prog;
 
@@ -10439,7 +10441,7 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 
 	if (bpf_ctx.u.wait_nr) {
 		ret = io_bpf_wait_cq_async(req, bpf_ctx.u.wait_nr,
-								bpf_ctx.u.wait_idx);
+									bpf_ctx.u.wait_idx);
 		if (!ret)
 			return;
 	}
@@ -10516,9 +10518,9 @@ static int __init io_uring_init(void)
 	BUILD_BUG_SQE_ELEM(44, __s32,  splice_fd_in);
 	BUILD_BUG_SQE_ELEM(48, __u16, cq_idx);
 
-	/* shoud be first, see io_bpf_is_valid_access() */
+	/* should be first, see io_bpf_is_valid_access() */
 	__BUILD_BUG_VERIFY_ELEMENT(struct io_bpf_ctx, 0,
-								struct io_uring_bpf_ctx, u);
+							struct io_uring_bpf_ctx, u);
 
 	BUILD_BUG_ON(ARRAY_SIZE(io_op_defs) != IORING_OP_LAST);
 	BUILD_BUG_ON(__REQ_F_LAST_BIT >= 8 * sizeof(int));

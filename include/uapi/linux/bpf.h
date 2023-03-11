@@ -3655,6 +3655,13 @@ union bpf_attr {
  * 	Return
  * 		0 on success, or a negative error in case of failure.
  *
+ * long bpf_copy_to_user(void *dst, u32 size, const void *user_ptr)
+ * 	Description
+ * 		Read *size* bytes from *src* and store the data in user space
+ * 		address *user_ptr*. This is a wrapper of **copy_to_user**\ ().
+ * 	Return
+ * 		0 on success, or a negative error in case of failure.
+ *
  * long bpf_snprintf_btf(char *str, u32 str_size, struct btf_ptr *ptr, u32 btf_ptr_size, u64 flags)
  *	Description
  *		Use BTF to store a string representation of *ptr*->ptr in *str*,
