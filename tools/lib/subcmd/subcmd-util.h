@@ -49,9 +49,10 @@ static NORETURN inline void die(const char *err, ...)
 
 static inline void *xrealloc(void *ptr, size_t size)
 {
-	void *ret = realloc(ptr, size);
-	if (!ret && !size)
-		ret = realloc(ptr, 1);
+	void *ret;
+	if (!size)
+		size = 1;
+	ret = realloc(ptr, size);
 	if (!ret) {
 		ret = realloc(ptr, size);
 		if (!ret && !size)
