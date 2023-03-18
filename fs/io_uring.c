@@ -347,6 +347,7 @@ struct io_bpf_ctx {
 
 struct io_ring_ctx {
 	struct {
+		/* 为解决多处理器对引用计数器的使用导致的cache-line抖动问题 */
 		struct percpu_ref	refs;
 	} ____cacheline_aligned_in_smp;
 
@@ -6875,6 +6876,7 @@ static void io_sqd_update_thread_idle(struct io_sq_data *sqd)
 	sqd->sq_thread_idle = sq_thread_idle;
 }
 
+/* a io-wq thread to reap sqe/submit cqe (in SQPOLL mode) */
 static int io_sq_thread(void *data)
 {
 	struct io_sq_data *sqd = data;
@@ -9405,7 +9407,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 	int submitted = 0;
 	struct fd f;
 
-	io_run_task_work();
+	io_run_task_work();  /* ??? */
 
 	if (flags & ~(IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP |
 			IORING_ENTER_SQ_WAIT | IORING_ENTER_EXT_ARG))
@@ -9434,7 +9436,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 	 * we were asked to.
 	 */
 	ret = 0;
-	if (ctx->flags & IORING_SETUP_SQPOLL) {
+	if (ctx->flags & IORING_SETUP_SQPOLL) {	/* SQPOLL mode */
 		io_cqring_overflow_flush(ctx, false, NULL, NULL);
 
 		ret = -EOWNERDEAD;
@@ -9449,7 +9451,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 				goto out;
 		}
 		submitted = to_submit;
-	} else if (to_submit) {
+	} else if (to_submit) {  /* IOPOLL mode */
 		ret = io_uring_add_task_file(ctx);
 		if (unlikely(ret))
 			goto out;
@@ -9771,15 +9773,16 @@ static int io_uring_create(unsigned entries, struct io_uring_params *p,
 	 * set IORING_SETUP_CQSIZE, it will have passed in the desired number
 	 * of CQ ring entries manually.
 	 */
-	p->sq_entries = roundup_pow_of_two(entries);
+	p->sq_entries = roundup_pow_of_two(entries); /* the ring must be a power of 2 in size. */
 	if (p->flags & IORING_SETUP_CQSIZE) {
 		long cq_entries = roundup_pow_of_two(p->cq_entries);
 		if (cq_entries < 0)
 			return cq_entries;
-		if (cq_entries < p->sq_entries)
+		if (cq_entries < p->sq_entries) /* size of cqring must be larger than sqring */
 			return -EINVAL;
 		p->cq_entries = cq_entries;
 	} else {
+		/* if the user doesn't specify #cqes, then #cqes = 2#sqes by default */
 		p->cq_entries = 2 * p->sq_entries;
 	}
 

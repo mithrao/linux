@@ -6,8 +6,6 @@
 #include <sys/resource.h>
 #include <bpf/libbpf.h>
 #include "helloworld.skel.h"
-
-
  
 static int libbpf_print_fn(enum libbpf_print_level level, 
                         const char *format, va_list args)
@@ -17,30 +15,20 @@ static int libbpf_print_fn(enum libbpf_print_level level,
 
 int main(int argc, char const *argv[])
 {
-    struct helloworld *skel;
-    int err;
-
-    libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
+    struct helloworld *payload;
+    int ret;
     /* set up libbpf errors and debug info callback */
     libbpf_set_print(libbpf_print_fn);
-
     /* open BPF application */
-    skel = helloworld__open();
-    if (!skel) {
-        fprintf(stderr, "Failed to open BPF skeleton\n");
-        return 1;
-    }
-
-    /* load & verify BPF prorgams */
-    err = helloworld__load(skel);
-    if (err) {
-        fprintf(stderr, "Failed to load and verify BPF skeleton\n");
-        goto cleanup;
-    }
+    payload = helloworld__open_and_load();
+	if (!payload) {
+		printf("load failed");
+		return 0;
+	}
 
     /* attach tracepoint handler */
-    err = helloworld__attach(skel);
-    if (err) {
+    ret = helloworld__attach(payload);
+    if (ret) {
         fprintf(stderr, "Failed to attach BPF skeleton\n");
         goto cleanup;
     }
@@ -55,8 +43,8 @@ int main(int argc, char const *argv[])
     }
 
 cleanup:
-    helloworld__destroy(skel);
-    return -err;
+    helloworld__destroy(payload);
+    return -ret;
 }
 
 
