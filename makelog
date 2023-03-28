@@ -1,92 +1,109 @@
-  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_32.h
-  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_x32.h
-  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_64.h
-  SYSTBL  arch/x86/include/generated/asm/syscalls_32.h
-  SYSHDR  arch/x86/include/generated/asm/unistd_32_ia32.h
-  SYSHDR  arch/x86/include/generated/asm/unistd_64_x32.h
-  SYSTBL  arch/x86/include/generated/asm/syscalls_64.h
-  HOSTCC  arch/x86/tools/relocs_32.o
-  HOSTCC  arch/x86/tools/relocs_64.o
-  HOSTCC  arch/x86/tools/relocs_common.o
-  HOSTCC  scripts/kallsyms
-  HOSTCC  scripts/sorttable
-  HOSTCC  scripts/asn1_compiler
-  HOSTCC  scripts/selinux/genheaders/genheaders
-  HOSTCC  scripts/selinux/mdp/mdp
   DESCEND  objtool
-  HOSTCC   /home/hwn/Desktop/linux/tools/objtool/fixdep.o
   DESCEND  bpf/resolve_btfids
-  HOSTCC  scripts/extract-cert
-  HOSTLD   /home/hwn/Desktop/linux/tools/objtool/fixdep-in.o
-  LINK     /home/hwn/Desktop/linux/tools/objtool/fixdep
-  MKDIR     /home/hwn/Desktop/linux/tools/bpf/resolve_btfids//libbpf
-  MKDIR     /home/hwn/Desktop/linux/tools/bpf/resolve_btfids//libsubcmd
-  HOSTCC   /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/fixdep.o
-  HOSTLD  arch/x86/tools/relocs
-  GEN      /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/bpf_helper_defs.h
-  CC       /home/hwn/Desktop/linux/tools/objtool/exec-cmd.o
-  HOSTLD   /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/fixdep-in.o
-  LINK     /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/fixdep
-  CC       /home/hwn/Desktop/linux/tools/objtool/help.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/pager.o
-  MKDIR    /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/libbpf.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/parse-options.o
-  MKDIR    /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/
-  CC       /home/hwn/Desktop/linux/tools/objtool/run-command.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/bpf.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/nlattr.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/btf.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/libbpf_errno.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/arch/x86/special.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/weak.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/str_error.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/arch/x86/decode.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/check.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/special.o
-  HOSTCC  scripts/mod/mk_elfconfig
-  CC      scripts/mod/empty.o
-  CC      scripts/mod/devicetable-offsets.s
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libbpf/staticobjs/netlink.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/main.o
-  MKELF   scripts/mod/elfconfig.h
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/exec-cmd.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/sigchain.o
-  HOSTCC  scripts/mod/modpost.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/help.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/rbtree.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/subcmd-config.o
-  LD       /home/hwn/Desktop/linux/tools/objtool/libsubcmd-in.o
-  AR       /home/hwn/Desktop/linux/tools/objtool/libsubcmd.a
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/pager.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/zalloc.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/string.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/orc_gen.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/ctype.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/orc_dump.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/str_error_r.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/parse-options.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/run-command.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/sigchain.o
-  LD       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/resolve_btfids-in.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/builtin-check.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/builtin-orc.o
-  CC       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/subcmd-config.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/elf.o
-  HOSTCC  scripts/mod/file2alias.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/objtool.o
-  HOSTCC  scripts/mod/sumversion.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/libstring.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/libctype.o
-  LD       /home/hwn/Desktop/linux/tools/objtool/arch/x86/objtool-in.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/str_error_r.o
-  CC       /home/hwn/Desktop/linux/tools/objtool/librbtree.o
-  LD       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/libsubcmd-in.o
-  AR       /home/hwn/Desktop/linux/tools/bpf/resolve_btfids/libsubcmd/libsubcmd.a
-  HOSTLD  scripts/mod/modpost
-  CC      kernel/bounds.s
   CALL    scripts/atomic/check-atomics.sh
-  CC      arch/x86/kernel/asm-offsets.s
-  LD       /home/hwn/Desktop/linux/tools/objtool/objtool-in.o
-  LINK     /home/hwn/Desktop/linux/tools/objtool/objtool
   CALL    scripts/checksyscalls.sh
+  CHK     include/generated/compile.h
+  GEN     .version
+  CHK     include/generated/compile.h
+  UPD     include/generated/compile.h
+  CC      init/version.o
+  AR      init/built-in.a
+  LD      vmlinux.o
+  MODPOST vmlinux.symvers
+  MODINFO modules.builtin.modinfo
+  GEN     modules.builtin
+  LD      .tmp_vmlinux.btf
+  BTF     .btf.vmlinux.bin.o
+  LD      .tmp_vmlinux.kallsyms1
+  KSYMS   .tmp_vmlinux.kallsyms1.S
+  AS      .tmp_vmlinux.kallsyms1.S
+  LD      .tmp_vmlinux.kallsyms2
+  KSYMS   .tmp_vmlinux.kallsyms2.S
+  AS      .tmp_vmlinux.kallsyms2.S
+  LD      vmlinux
+  BTFIDS  vmlinux
+  SORTTAB vmlinux
+  SYSMAP  System.map
+  MODPOST Module.symvers
+  CC      arch/x86/boot/a20.o
+  AS      arch/x86/boot/bioscall.o
+  CC      arch/x86/boot/cmdline.o
+  AS      arch/x86/boot/copy.o
+  HOSTCC  arch/x86/boot/mkcpustr
+  CC      arch/x86/boot/cpuflags.o
+  CC      arch/x86/boot/cpucheck.o
+  CC      arch/x86/boot/early_serial_console.o
+  CC      arch/x86/boot/edd.o
+  CC [M]  drivers/thermal/intel/x86_pkg_temp_thermal.mod.o
+  CC [M]  fs/efivarfs/efivarfs.mod.o
+  CC      arch/x86/boot/main.o
+  CC      arch/x86/boot/memory.o
+  CC [M]  net/ipv4/netfilter/iptable_nat.mod.o
+  CC [M]  net/ipv4/netfilter/nf_log_arp.mod.o
+  CC [M]  net/ipv4/netfilter/nf_log_ipv4.mod.o
+  CC      arch/x86/boot/pm.o
+  LDS     arch/x86/boot/compressed/vmlinux.lds
+  AS      arch/x86/boot/pmjump.o
+  AS      arch/x86/boot/compressed/kernel_info.o
+  AS      arch/x86/boot/compressed/head_64.o
+  CC      arch/x86/boot/printf.o
+  VOFFSET arch/x86/boot/compressed/../voffset.h
+  CC      arch/x86/boot/regs.o
+  CC      arch/x86/boot/string.o
+  CC      arch/x86/boot/tty.o
+  CC      arch/x86/boot/video.o
+  CC      arch/x86/boot/video-mode.o
+  CC      arch/x86/boot/version.o
+  CC      arch/x86/boot/video-vga.o
+  CC      arch/x86/boot/video-vesa.o
+  CC      arch/x86/boot/compressed/string.o
+  CC [M]  net/ipv6/netfilter/nf_log_ipv6.mod.o
+  CC      arch/x86/boot/compressed/cmdline.o
+  CC [M]  net/netfilter/nf_log_common.mod.o
+  CC      arch/x86/boot/video-bios.o
+  HOSTCC  arch/x86/boot/tools/build
+  CC      arch/x86/boot/compressed/error.o
+  CPUSTR  arch/x86/boot/cpustr.h
+  OBJCOPY arch/x86/boot/compressed/vmlinux.bin
+  CC      arch/x86/boot/cpu.o
+  RELOCS  arch/x86/boot/compressed/vmlinux.relocs
+  HOSTCC  arch/x86/boot/compressed/mkpiggy
+  CC      arch/x86/boot/compressed/cpuflags.o
+  CC      arch/x86/boot/compressed/early_serial_console.o
+  CC [M]  net/netfilter/xt_LOG.mod.o
+  CC [M]  net/netfilter/xt_MASQUERADE.mod.o
+  CC [M]  net/netfilter/xt_addrtype.mod.o
+  CC      arch/x86/boot/compressed/kaslr.o
+  CC      arch/x86/boot/compressed/ident_map_64.o
+  CC [M]  net/netfilter/xt_mark.mod.o
+  CC      arch/x86/boot/compressed/idt_64.o
+  CC [M]  net/netfilter/xt_nat.mod.o
+  AS      arch/x86/boot/compressed/idt_handlers_64.o
+  AS      arch/x86/boot/compressed/mem_encrypt.o
+  CC      arch/x86/boot/compressed/pgtable_64.o
+  CC      arch/x86/boot/compressed/acpi.o
+  LD [M]  drivers/thermal/intel/x86_pkg_temp_thermal.ko
+  AS      arch/x86/boot/compressed/efi_thunk_64.o
+  LD [M]  fs/efivarfs/efivarfs.ko
+  LD [M]  net/ipv4/netfilter/iptable_nat.ko
+  LD [M]  net/ipv4/netfilter/nf_log_arp.ko
+  LD [M]  net/ipv4/netfilter/nf_log_ipv4.ko
+  LD [M]  net/ipv6/netfilter/nf_log_ipv6.ko
+  LD [M]  net/netfilter/nf_log_common.ko
+  CC      arch/x86/boot/compressed/misc.o
+  GZIP    arch/x86/boot/compressed/vmlinux.bin.gz
+  LD [M]  net/netfilter/xt_LOG.ko
+  LD [M]  net/netfilter/xt_MASQUERADE.ko
+  LD [M]  net/netfilter/xt_addrtype.ko
+  LD [M]  net/netfilter/xt_mark.ko
+  LD [M]  net/netfilter/xt_nat.ko
+  MKPIGGY arch/x86/boot/compressed/piggy.S
+  AS      arch/x86/boot/compressed/piggy.o
+  LD      arch/x86/boot/compressed/vmlinux
+  OBJCOPY arch/x86/boot/vmlinux.bin
+  ZOFFSET arch/x86/boot/zoffset.h
+  AS      arch/x86/boot/header.o
+  LD      arch/x86/boot/setup.elf
+  OBJCOPY arch/x86/boot/setup.bin
+  BUILD   arch/x86/boot/bzImage
+Kernel: arch/x86/boot/bzImage is ready  (#9)

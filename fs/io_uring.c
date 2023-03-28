@@ -340,11 +340,6 @@ struct io_cqring {
 	struct io_rings *rings;
 };
 
-struct io_bpf_ctx {
-	struct io_uring_bpf_ctx u;
-	struct io_kiocb			*req;
-};
-
 struct io_ring_ctx {
 	struct {
 		/* 为解决多处理器对引用计数器的使用导致的cache-line抖动问题 */

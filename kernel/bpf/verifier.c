@@ -8559,7 +8559,7 @@ static int check_return_code(struct bpf_verifier_env *env)
 		range = tnum_range(SK_DROP, SK_PASS);
 		break;
 	case BPF_PROG_TYPE_IOURING:
-		rang = tnum_const(0);
+		range = tnum_const(0);
 		break;
 	case BPF_PROG_TYPE_EXT:
 		/* freplace program can return anything as its return value

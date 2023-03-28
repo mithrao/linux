@@ -8563,9 +8563,6 @@ static const struct bpf_sec_def section_defs[] = {
 		.expected_attach_type = BPF_TRACE_ITER,
 		.is_attach_btf = true,
 		.attach_fn = attach_iter),
-	SEC_DEF("iouring/", IOURING),
-	SEC_DEF("iouring.s/", IOURING,
-			.is_sleepable = true),
 	BPF_EAPROG_SEC("xdp_devmap/",		BPF_PROG_TYPE_XDP,
 						BPF_XDP_DEVMAP),
 	BPF_EAPROG_SEC("xdp_cpumap/",		BPF_PROG_TYPE_XDP,
@@ -8640,9 +8637,8 @@ static const struct bpf_sec_def section_defs[] = {
 	BPF_PROG_SEC("struct_ops",		BPF_PROG_TYPE_STRUCT_OPS),
 	BPF_EAPROG_SEC("sk_lookup/",		BPF_PROG_TYPE_SK_LOOKUP,
 						BPF_SK_LOOKUP),
-	SEC_DEF("iouring/",			IOURING),
-	SEC_DEF("iouring.s/", 
-			.is_sleepable = true),
+	BPF_PROG_SEC("iouring",	BPF_PROG_TYPE_IOURING),
+	BPF_PROG_SEC("iouring.s",	BPF_PROG_TYPE_IOURING),
 };
 
 #undef BPF_PROG_SEC_IMPL
