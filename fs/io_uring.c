@@ -340,6 +340,15 @@ struct io_cqring {
 	struct io_rings *rings;
 };
 
+struct io_bpf_ctx {
+	/* 
+	 * IORING_ENTER_GETEVENTS模式下，
+	 * 期待的最少completion event数 
+	 */ 
+	u32				wait_nr;
+	u32				wait_idx; /* 负责收割的完成队列编号 */
+};
+
 struct io_ring_ctx {
 	struct {
 		/* 为解决多处理器对引用计数器的使用导致的cache-line抖动问题 */
