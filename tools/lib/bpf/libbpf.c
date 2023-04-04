@@ -59,9 +59,6 @@
 #include "libbpf_internal.h"
 #include "hashmap.h"
 
-/* hack, use local headers instead of system-wide */
-#include "../../../include/uapi/linux/bpf.h"
-
 #ifndef EM_BPF
 #define EM_BPF 247
 #endif
@@ -8508,6 +8505,9 @@ static const struct bpf_sec_def section_defs[] = {
 	BPF_PROG_SEC("uretprobe/",		BPF_PROG_TYPE_KPROBE),
 	BPF_PROG_SEC("classifier",		BPF_PROG_TYPE_SCHED_CLS),
 	BPF_PROG_SEC("action",			BPF_PROG_TYPE_SCHED_ACT),
+	SEC_DEF("iouring.s/", IOURING,
+			.is_sleepable = true),
+	BPF_PROG_SEC("iouring/", 		BPF_PROG_TYPE_IOURING),
 	SEC_DEF("tracepoint/", TRACEPOINT,
 		.attach_fn = attach_tp),
 	SEC_DEF("tp/", TRACEPOINT,
@@ -8637,8 +8637,6 @@ static const struct bpf_sec_def section_defs[] = {
 	BPF_PROG_SEC("struct_ops",		BPF_PROG_TYPE_STRUCT_OPS),
 	BPF_EAPROG_SEC("sk_lookup/",		BPF_PROG_TYPE_SK_LOOKUP,
 						BPF_SK_LOOKUP),
-	BPF_PROG_SEC("iouring",	BPF_PROG_TYPE_IOURING),
-	BPF_PROG_SEC("iouring.s",	BPF_PROG_TYPE_IOURING),
 };
 
 #undef BPF_PROG_SEC_IMPL

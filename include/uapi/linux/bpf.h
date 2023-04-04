@@ -3647,15 +3647,8 @@ union bpf_attr {
  * 		the data in *dst*. This is a wrapper of **copy_from_user**\ ().
  * 	Return
  * 		0 on success, or a negative error in case of failure.
- * 
- *  long bpf_copy_to_user(void *dst, u32 size, const void *user_ptr)
- * 	Description
- * 		Read *size* bytes *src* and store the data in user space 
- *      address *user_ptr*. This is a wrapper of **copy_to_user**\ ().
- * 	Return
- * 		0 on success, or a negative error in case of failure.
  *
- * long bpf_copy_to_user(void *dst, u32 size, const void *user_ptr)
+ * long bpf_copy_to_user(void *user_ptr, const void *src, u32 size)
  * 	Description
  * 		Read *size* bytes from *src* and store the data in user space
  * 		address *user_ptr*. This is a wrapper of **copy_to_user**\ ().
@@ -4096,9 +4089,9 @@ union bpf_attr {
 	FN(ima_inode_hash),		\
 	FN(sock_from_file),		\
 	FN(check_mtu),			\
-	FN(iouring_queue_sqe),	\
-	FN(iouring_emit_cqe),   \
-	FN(iouring_reap_cqe),	\
+	FN(iouring_queue_sqe),		\
+	FN(iouring_emit_cqe),		\
+	FN(iouring_reap_cqe),		\
 	FN(copy_to_user),		\
 	/* */
 

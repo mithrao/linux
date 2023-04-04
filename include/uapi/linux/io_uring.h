@@ -24,7 +24,7 @@ struct io_uring_sqe {
 		__u64	addr2;
 	};
 	union {
-		__u64	addr;	/* pointer to buffer or iovecs */
+		__u64	addr;	/* pointer to buffer or iovecs (readv/writev) */
 		__u64	splice_off_in;
 	};
 	__u32	len;		/* buffer size or number of iovecs */
@@ -58,8 +58,12 @@ struct io_uring_sqe {
 			/* personality to use, if used */
 			__u16	personality;
 			__s32	splice_fd_in;
-			__u16   cq_idx;
+			__u16	cq_idx;
 		};
+		/* there's some padding at the end of the structure. This serves 
+		the purpose of ensuring that the sqe is aligned nicely in memory 
+		at 64 bytes in size, but also for future use cases that may need 
+		to contain more data to describe a request. */
 		__u64	__pad2[3];
 	};
 };
@@ -162,6 +166,21 @@ enum {
 #define SPLICE_F_FD_IN_FIXED	(1U << 31) /* the last bit of __u32 */
 
 /*
+ * POLL_ADD flags. Note that since sqe->poll_events is the flag space, the
+ * command flags for POLL_ADD are stored in sqe->len.
+ *
+ * IORING_POLL_ADD_MULTI	Multishot poll. Sets IORING_CQE_F_MORE if
+ *				the poll handler will continue to report
+ *				CQEs on behalf of the same SQE.
+ *
+ * IORING_POLL_UPDATE		Update existing poll request, matching
+ *				sqe->addr as the old user_data field.
+ */
+#define IORING_POLL_ADD_MULTI	(1U << 0)
+#define IORING_POLL_UPDATE_EVENTS	(1U << 1)
+#define IORING_POLL_UPDATE_USER_DATA	(1U << 2)
+
+/*
  * IO completion data structure (Completion Queue Entry)
  */
 struct io_uring_cqe {
@@ -174,8 +193,10 @@ struct io_uring_cqe {
  * cqe->flags
  *
  * IORING_CQE_F_BUFFER	If set, the upper 16 bits are the buffer ID
+ * IORING_CQE_F_MORE	If set, parent SQE will generate more CQE entries
  */
 #define IORING_CQE_F_BUFFER		(1U << 0)
+#define IORING_CQE_F_MORE		(1U << 1)
 
 enum {
 	IORING_CQE_BUFFER_SHIFT		= 16,
@@ -188,7 +209,7 @@ enum {
 #define IORING_OFF_CQ_RING		0x8000000ULL
 #define IORING_OFF_SQES			0x10000000ULL
 #define IORING_OFF_CQ_RING_EXTRA	0x1200000ULL
-#define IORING_STRID_CQ_RING		0x0100000ULL
+#define IORING_STRIDE_CQ_RING		0x0100000ULL
 
 /*
  * Filled with the offset for mmap(2)
@@ -286,8 +307,10 @@ enum {
 	IORING_UNREGISTER_PERSONALITY		= 10,
 	IORING_REGISTER_RESTRICTIONS		= 11,
 	IORING_REGISTER_ENABLE_RINGS		= 12,
-	IORING_REGISTER_BPF					= 13,
-	IORING_UNREGISTER_BPF				= 14,
+	IORING_REGISTER_RSRC			= 13,
+	IORING_REGISTER_RSRC_UPDATE		= 14,
+	IORING_REGISTER_BPF			= 15,
+	IORING_UNREGISTER_BPF			= 16,
 
 	/* this goes last */
 	IORING_REGISTER_LAST
@@ -300,10 +323,31 @@ struct io_uring_files_update {
 	__aligned_u64 /* __s32 * */ fds;
 };
 
+enum {
+	IORING_RSRC_FILE		= 0,
+	IORING_RSRC_BUFFER		= 1,
+};
+
+struct io_uring_rsrc_register {
+	__u32 type;
+	__u32 nr;
+	__aligned_u64 data;
+	__aligned_u64 tags;
+};
+
 struct io_uring_rsrc_update {
 	__u32 offset;
 	__u32 resv;
 	__aligned_u64 data;
+};
+
+struct io_uring_rsrc_update2 {
+	__u32 offset;
+	__u32 resv;
+	__aligned_u64 data;
+	__aligned_u64 tags;
+	__u32 type;
+	__u32 nr;
 };
 
 /* Skip updating fd indexes set to this value in the fd table */
@@ -364,9 +408,9 @@ struct io_uring_getevents_arg {
 };
 
 struct io_uring_bpf_ctx {
-	__u64 user_data;
-	__u32 wait_nr;
-	__u32 wait_idx;
+	__u64	user_data;
+	__u32	wait_nr;
+	__u32	wait_idx;
 };
 
 #endif
