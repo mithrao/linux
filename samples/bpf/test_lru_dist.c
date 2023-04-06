@@ -33,9 +33,9 @@ static int nr_cpus;
 static unsigned long long *dist_keys;
 static unsigned int dist_key_counts;
 
-struct list_head {
-	struct list_head *next, *prev;
-};
+// struct list_head {
+// 	struct list_head *next, *prev;
+// };
 
 static inline void INIT_LIST_HEAD(struct list_head *list)
 {

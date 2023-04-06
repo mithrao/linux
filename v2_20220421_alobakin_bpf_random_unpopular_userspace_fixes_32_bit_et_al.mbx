@@ -1,0 +1,747 @@
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 1/11] bpftool: use a local copy of perf_event to fix
+ accessing ::bpf_cookie
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:38:45 +0000
+Message-Id: <20220421003152.339542-2-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+When CONFIG_PERF_EVENTS is not set, struct perf_event remains empty.
+However, the structure is being used by bpftool indirectly via BTF.
+This leads to:
+
+skeleton/pid_iter.bpf.c:49:30: error: no member named 'bpf_cookie' in 'struct perf_event'
+        return BPF_CORE_READ(event, bpf_cookie);
+               ~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~
+
+...
+
+skeleton/pid_iter.bpf.c:49:9: error: returning 'void' from a function with incompatible result type '__u64' (aka 'unsigned long long')
+        return BPF_CORE_READ(event, bpf_cookie);
+               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Tools and samples can't use any CONFIG_ definitions, so the fields
+used there should always be present.
+Define struct perf_event___local with the `preserve_access_index`
+attribute inside the pid_iter BPF prog to allow compiling on any
+configs. CO-RE will substitute it with the real struct perf_event
+accesses later on.
+
+Fixes: cbdaf71f7e65 ("bpftool: Add bpf_cookie to link output")
+Suggested-by: Andrii Nakryiko <andrii@kernel.org>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ tools/bpf/bpftool/skeleton/pid_iter.bpf.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/tools/bpf/bpftool/skeleton/pid_iter.bpf.c b/tools/bpf/bpftool/skeleton/pid_iter.bpf.c
+index eb05ea53afb1..e2af8e5fb29e 100644
+--- a/tools/bpf/bpftool/skeleton/pid_iter.bpf.c
++++ b/tools/bpf/bpftool/skeleton/pid_iter.bpf.c
+@@ -15,6 +15,10 @@ enum bpf_obj_type {
+ 	BPF_OBJ_BTF,
+ };
+
++struct perf_event___local {
++	u64 bpf_cookie;
++} __attribute__((preserve_access_index));
++
+ extern const void bpf_link_fops __ksym;
+ extern const void bpf_map_fops __ksym;
+ extern const void bpf_prog_fops __ksym;
+@@ -41,8 +45,8 @@ static __always_inline __u32 get_obj_id(void *ent, enum bpf_obj_type type)
+ /* could be used only with BPF_LINK_TYPE_PERF_EVENT links */
+ static __u64 get_bpf_cookie(struct bpf_link *link)
+ {
++	struct perf_event___local *event;
+ 	struct bpf_perf_link *perf_link;
+-	struct perf_event *event;
+
+ 	perf_link = container_of(link, struct bpf_perf_link, link);
+ 	event = BPF_CORE_READ(perf_link, perf_file, private_data);
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 2/11] bpftool: define a local bpf_perf_link to fix
+ accessing its fields
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:38:58 +0000
+Message-Id: <20220421003152.339542-3-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+When building bpftool with !CONFIG_PERF_EVENTS:
+
+skeleton/pid_iter.bpf.c:47:14: error: incomplete definition of type 'struct bpf_perf_link'
+        perf_link = container_of(link, struct bpf_perf_link, link);
+                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tools/bpf/bpftool/bootstrap/libbpf/include/bpf/bpf_helpers.h:74:22: note: expanded from macro 'container_of'
+                ((type *)(__mptr - offsetof(type, member)));    \
+                                   ^~~~~~~~~~~~~~~~~~~~~~
+tools/bpf/bpftool/bootstrap/libbpf/include/bpf/bpf_helpers.h:68:60: note: expanded from macro 'offsetof'
+ #define offsetof(TYPE, MEMBER)  ((unsigned long)&((TYPE *)0)->MEMBER)
+                                                  ~~~~~~~~~~~^
+skeleton/pid_iter.bpf.c:44:9: note: forward declaration of 'struct bpf_perf_link'
+        struct bpf_perf_link *perf_link;
+               ^
+
+&bpf_perf_link is being defined and used only under the ifdef.
+Define struct bpf_perf_link___local with the `preserve_access_index`
+attribute inside the pid_iter BPF prog to allow compiling on any
+configs. CO-RE will substitute it with the real struct bpf_perf_link
+accesses later on.
+container_of() is not CO-REd, but it is a noop for
+bpf_perf_link <-> bpf_link and the local copy is a full mirror of
+the original structure.
+
+Fixes: cbdaf71f7e65 ("bpftool: Add bpf_cookie to link output")
+Suggested-by: Andrii Nakryiko <andrii@kernel.org>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ tools/bpf/bpftool/skeleton/pid_iter.bpf.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/tools/bpf/bpftool/skeleton/pid_iter.bpf.c b/tools/bpf/bpftool/skeleton/pid_iter.bpf.c
+index e2af8e5fb29e..3a4c4f7d83d8 100644
+--- a/tools/bpf/bpftool/skeleton/pid_iter.bpf.c
++++ b/tools/bpf/bpftool/skeleton/pid_iter.bpf.c
+@@ -15,6 +15,11 @@ enum bpf_obj_type {
+ 	BPF_OBJ_BTF,
+ };
+
++struct bpf_perf_link___local {
++	struct bpf_link link;
++	struct file *perf_file;
++} __attribute__((preserve_access_index));
++
+ struct perf_event___local {
+ 	u64 bpf_cookie;
+ } __attribute__((preserve_access_index));
+@@ -45,10 +50,10 @@ static __always_inline __u32 get_obj_id(void *ent, enum bpf_obj_type type)
+ /* could be used only with BPF_LINK_TYPE_PERF_EVENT links */
+ static __u64 get_bpf_cookie(struct bpf_link *link)
+ {
++	struct bpf_perf_link___local *perf_link;
+ 	struct perf_event___local *event;
+-	struct bpf_perf_link *perf_link;
+
+-	perf_link = container_of(link, struct bpf_perf_link, link);
++	perf_link = container_of(link, struct bpf_perf_link___local, link);
+ 	event = BPF_CORE_READ(perf_link, perf_file, private_data);
+ 	return BPF_CORE_READ(event, bpf_cookie);
+ }
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 3/11] bpftool: use a local bpf_perf_event_value to fix
+ accessing its fields
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:04 +0000
+Message-Id: <20220421003152.339542-4-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Fix the following error when building bpftool:
+
+  CLANG   profiler.bpf.o
+  CLANG   pid_iter.bpf.o
+skeleton/profiler.bpf.c:18:21: error: invalid application of 'sizeof' to an incomplete type 'struct bpf_perf_event_value'
+        __uint(value_size, sizeof(struct bpf_perf_event_value));
+                           ^     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tools/bpf/bpftool/bootstrap/libbpf/include/bpf/bpf_helpers.h:13:39: note: expanded from macro '__uint'
+tools/bpf/bpftool/bootstrap/libbpf/include/bpf/bpf_helper_defs.h:7:8: note: forward declaration of 'struct bpf_perf_event_value'
+struct bpf_perf_event_value;
+       ^
+
+struct bpf_perf_event_value is being used in the kernel only when
+CONFIG_BPF_EVENTS is enabled, so it misses a BTF entry then.
+Define struct bpf_perf_event_value___local with the
+`preserve_access_index` attribute inside the pid_iter BPF prog to
+allow compiling on any configs. It is a full mirror of a UAPI
+structure, so is compatible both with and w/o CO-RE.
+bpf_perf_event_read_value() requires a pointer of the original type,
+so a cast is needed.
+
+Fixes: 47c09d6a9f67 ("bpftool: Introduce "prog profile" command")
+Suggested-by: Andrii Nakryiko <andrii@kernel.org>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ tools/bpf/bpftool/skeleton/profiler.bpf.c | 27 ++++++++++++++---------
+ 1 file changed, 17 insertions(+), 10 deletions(-)
+
+diff --git a/tools/bpf/bpftool/skeleton/profiler.bpf.c b/tools/bpf/bpftool/skeleton/profiler.bpf.c
+index ce5b65e07ab1..2f80edc682f1 100644
+--- a/tools/bpf/bpftool/skeleton/profiler.bpf.c
++++ b/tools/bpf/bpftool/skeleton/profiler.bpf.c
+@@ -4,6 +4,12 @@
+ #include <bpf/bpf_helpers.h>
+ #include <bpf/bpf_tracing.h>
+
++struct bpf_perf_event_value___local {
++	__u64 counter;
++	__u64 enabled;
++	__u64 running;
++} __attribute__((preserve_access_index));
++
+ /* map of perf event fds, num_cpu * num_metric entries */
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+@@ -15,14 +21,14 @@ struct {
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+ 	__uint(key_size, sizeof(u32));
+-	__uint(value_size, sizeof(struct bpf_perf_event_value));
++	__uint(value_size, sizeof(struct bpf_perf_event_value___local));
+ } fentry_readings SEC(".maps");
+
+ /* accumulated readings */
+ struct {
+ 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+ 	__uint(key_size, sizeof(u32));
+-	__uint(value_size, sizeof(struct bpf_perf_event_value));
++	__uint(value_size, sizeof(struct bpf_perf_event_value___local));
+ } accum_readings SEC(".maps");
+
+ /* sample counts, one per cpu */
+@@ -39,7 +45,7 @@ const volatile __u32 num_metric = 1;
+ SEC("fentry/XXX")
+ int BPF_PROG(fentry_XXX)
+ {
+-	struct bpf_perf_event_value *ptrs[MAX_NUM_MATRICS];
++	struct bpf_perf_event_value___local *ptrs[MAX_NUM_MATRICS];
+ 	u32 key = bpf_get_smp_processor_id();
+ 	u32 i;
+
+@@ -53,10 +59,10 @@ int BPF_PROG(fentry_XXX)
+ 	}
+
+ 	for (i = 0; i < num_metric && i < MAX_NUM_MATRICS; i++) {
+-		struct bpf_perf_event_value reading;
++		struct bpf_perf_event_value___local reading;
+ 		int err;
+
+-		err = bpf_perf_event_read_value(&events, key, &reading,
++		err = bpf_perf_event_read_value(&events, key, (void *)&reading,
+ 						sizeof(reading));
+ 		if (err)
+ 			return 0;
+@@ -68,14 +74,14 @@ int BPF_PROG(fentry_XXX)
+ }
+
+ static inline void
+-fexit_update_maps(u32 id, struct bpf_perf_event_value *after)
++fexit_update_maps(u32 id, struct bpf_perf_event_value___local *after)
+ {
+-	struct bpf_perf_event_value *before, diff;
++	struct bpf_perf_event_value___local *before, diff;
+
+ 	before = bpf_map_lookup_elem(&fentry_readings, &id);
+ 	/* only account samples with a valid fentry_reading */
+ 	if (before && before->counter) {
+-		struct bpf_perf_event_value *accum;
++		struct bpf_perf_event_value___local *accum;
+
+ 		diff.counter = after->counter - before->counter;
+ 		diff.enabled = after->enabled - before->enabled;
+@@ -93,7 +99,7 @@ fexit_update_maps(u32 id, struct bpf_perf_event_value *after)
+ SEC("fexit/XXX")
+ int BPF_PROG(fexit_XXX)
+ {
+-	struct bpf_perf_event_value readings[MAX_NUM_MATRICS];
++	struct bpf_perf_event_value___local readings[MAX_NUM_MATRICS];
+ 	u32 cpu = bpf_get_smp_processor_id();
+ 	u32 i, zero = 0;
+ 	int err;
+@@ -102,7 +108,8 @@ int BPF_PROG(fexit_XXX)
+ 	/* read all events before updating the maps, to reduce error */
+ 	for (i = 0; i < num_metric && i < MAX_NUM_MATRICS; i++) {
+ 		err = bpf_perf_event_read_value(&events, cpu + i * num_cpu,
+-						readings + i, sizeof(*readings));
++						(void *)(readings + i),
++						sizeof(*readings));
+ 		if (err)
+ 			return 0;
+ 	}
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 4/11] bpftool: fix fcntl.h include
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:11 +0000
+Message-Id: <20220421003152.339542-5-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Fix the following (on some libc implementations):
+
+  CC      tracelog.o
+In file included from tracelog.c:12:
+include/sys/fcntl.h:1:2: warning: #warning redirecting incorrect #include <sys/fcntl.h> to <fcntl.h> [-Wcpp]
+    1 | #warning redirecting incorrect #include <sys/fcntl.h> to <fcntl.h>
+      |  ^~~~~~~
+
+<sys/fcntl.h> is anyway just a wrapper over <fcntl.h> (backcomp
+stuff).
+
+Fixes: 30da46b5dc3a ("tools: bpftool: add a command to dump the trace pipe")
+Acked-by: Song Liu <songliubraving@fb.com>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ tools/bpf/bpftool/tracelog.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/bpf/bpftool/tracelog.c b/tools/bpf/bpftool/tracelog.c
+index e80a5c79b38f..bf1f02212797 100644
+--- a/tools/bpf/bpftool/tracelog.c
++++ b/tools/bpf/bpftool/tracelog.c
+@@ -9,7 +9,7 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <linux/magic.h>
+-#include <sys/fcntl.h>
++#include <fcntl.h>
+ #include <sys/vfs.h>
+
+ #include "main.h"
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 5/11] samples/bpf: add 'asm/mach-generic' include path
+ for every MIPS
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:22 +0000
+Message-Id: <20220421003152.339542-6-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Fix the following:
+
+In file included from samples/bpf/tracex2_kern.c:7:
+In file included from ./include/linux/skbuff.h:13:
+In file included from ./include/linux/kernel.h:22:
+In file included from ./include/linux/bitops.h:33:
+In file included from ./arch/mips/include/asm/bitops.h:20:
+In file included from ./arch/mips/include/asm/barrier.h:11:
+./arch/mips/include/asm/addrspace.h:13:10: fatal error: 'spaces.h' file not found
+ #include <spaces.h>
+          ^~~~~~~~~~
+
+'arch/mips/include/asm/mach-generic' should always be included as
+many other MIPS include files rely on this.
+Move it from under CONFIG_MACH_LOONGSON64 to let it be included
+for every MIPS.
+
+Fixes: 058107abafc7 ("samples/bpf: Add include dir for MIPS Loongson64 to fix build errors")
+Acked-by: Song Liu <songliubraving@fb.com>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ samples/bpf/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/samples/bpf/Makefile b/samples/bpf/Makefile
+index 38638845db9d..70323ac1114f 100644
+--- a/samples/bpf/Makefile
++++ b/samples/bpf/Makefile
+@@ -194,8 +194,8 @@ ifeq ($(ARCH), mips)
+ TPROGS_CFLAGS += -D__SANE_USERSPACE_TYPES__
+ ifdef CONFIG_MACH_LOONGSON64
+ BPF_EXTRA_CFLAGS += -I$(srctree)/arch/mips/include/asm/mach-loongson64
+-BPF_EXTRA_CFLAGS += -I$(srctree)/arch/mips/include/asm/mach-generic
+ endif
++BPF_EXTRA_CFLAGS += -I$(srctree)/arch/mips/include/asm/mach-generic
+ endif
+
+ TPROGS_CFLAGS += -Wall -O2
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 6/11] samples/bpf: use host bpftool to generate
+ vmlinux.h, not target
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:27 +0000
+Message-Id: <20220421003152.339542-7-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Use the host build of bpftool (bootstrap) instead of the target one
+to generate vmlinux.h/skeletons for the BPF samples. Otherwise, when
+host != target, samples compilation fails with:
+
+/bin/sh: line 1: samples/bpf/bpftool/bpftool: failed to exec: Exec
+format error
+
+Fixes: 384b6b3bbf0d ("samples: bpf: Add vmlinux.h generation support")
+Acked-by: Kumar Kartikeya Dwivedi <memxor@gmail.com>
+Acked-by: Song Liu <songliubraving@fb.com>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ samples/bpf/Makefile | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/samples/bpf/Makefile b/samples/bpf/Makefile
+index 70323ac1114f..2bb9088a8d91 100644
+--- a/samples/bpf/Makefile
++++ b/samples/bpf/Makefile
+@@ -291,12 +291,13 @@ $(LIBBPF): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(LIBBPF_OU
+
+ BPFTOOLDIR := $(TOOLS_PATH)/bpf/bpftool
+ BPFTOOL_OUTPUT := $(abspath $(BPF_SAMPLES_PATH))/bpftool
+-BPFTOOL := $(BPFTOOL_OUTPUT)/bpftool
++BPFTOOL := $(BPFTOOL_OUTPUT)/bootstrap/bpftool
+ $(BPFTOOL): $(LIBBPF) $(wildcard $(BPFTOOLDIR)/*.[ch] $(BPFTOOLDIR)/Makefile) | $(BPFTOOL_OUTPUT)
+ 	    $(MAKE) -C $(BPFTOOLDIR) srctree=$(BPF_SAMPLES_PATH)/../../ \
+ 		OUTPUT=$(BPFTOOL_OUTPUT)/ \
+ 		LIBBPF_OUTPUT=$(LIBBPF_OUTPUT)/ \
+-		LIBBPF_DESTDIR=$(LIBBPF_DESTDIR)/
++		LIBBPF_DESTDIR=$(LIBBPF_DESTDIR)/ \
++		bootstrap
+
+ $(LIBBPF_OUTPUT) $(BPFTOOL_OUTPUT):
+ 	$(call msg,MKDIR,$@)
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 7/11] samples/bpf: fix uin64_t format literals
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:32 +0000
+Message-Id: <20220421003152.339542-8-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+There's a couple places where uin64_t is being passed as an %lu
+format argument. That type is defined as unsigned long on 64-bit
+systems and as unsigned long long on 32-bit, so neither %lu nor
+%llu are not universal.
+One of the options is %PRIu64, but since it's always 8-byte long,
+just cast it to the _proper_ __u64 and print as %llu.
+
+Fixes: 51570a5ab2b7 ("A Sample of using socket cookie and uid for traffic monitoring")
+Fixes: 00f660eaf378 ("Sample program using SO_COOKIE")
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 07:46:05 +0000
+---
+ samples/bpf/cookie_uid_helper_example.c | 12 ++++++------
+ samples/bpf/lwt_len_hist_user.c         |  7 ++++---
+ 2 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/samples/bpf/cookie_uid_helper_example.c b/samples/bpf/cookie_uid_helper_example.c
+index f0df3dda4b1f..269fac58fd5c 100644
+--- a/samples/bpf/cookie_uid_helper_example.c
++++ b/samples/bpf/cookie_uid_helper_example.c
+@@ -207,9 +207,9 @@ static void print_table(void)
+ 			error(1, errno, "fail to get entry value of Key: %u\n",
+ 				curN);
+ 		} else {
+-			printf("cookie: %u, uid: 0x%x, Packet Count: %lu,"
+-				" Bytes Count: %lu\n", curN, curEntry.uid,
+-				curEntry.packets, curEntry.bytes);
++			printf("cookie: %u, uid: 0x%x, Packet Count: %llu, Bytes Count: %llu\n",
++			       curN, curEntry.uid, (__u64)curEntry.packets,
++			       (__u64)curEntry.bytes);
+ 		}
+ 	}
+ }
+@@ -265,9 +265,9 @@ static void udp_client(void)
+ 		if (res < 0)
+ 			error(1, errno, "lookup sk stat failed, cookie: %lu\n",
+ 			      cookie);
+-		printf("cookie: %lu, uid: 0x%x, Packet Count: %lu,"
+-			" Bytes Count: %lu\n\n", cookie, dataEntry.uid,
+-			dataEntry.packets, dataEntry.bytes);
++		printf("cookie: %llu, uid: 0x%x, Packet Count: %llu, Bytes Count: %llu\n\n",
++		       (__u64)cookie, dataEntry.uid, (__u64)dataEntry.packets,
++		       (__u64)dataEntry.bytes);
+ 	}
+ 	close(s_send);
+ 	close(s_rcv);
+diff --git a/samples/bpf/lwt_len_hist_user.c b/samples/bpf/lwt_len_hist_user.c
+index 430a4b7e353e..c682faa75a2b 100644
+--- a/samples/bpf/lwt_len_hist_user.c
++++ b/samples/bpf/lwt_len_hist_user.c
+@@ -44,7 +44,8 @@ int main(int argc, char **argv)
+
+ 	while (bpf_map_get_next_key(map_fd, &key, &next_key) == 0) {
+ 		if (next_key >= MAX_INDEX) {
+-			fprintf(stderr, "Key %lu out of bounds\n", next_key);
++			fprintf(stderr, "Key %llu out of bounds\n",
++				(__u64)next_key);
+ 			continue;
+ 		}
+
+@@ -66,8 +67,8 @@ int main(int argc, char **argv)
+
+ 	for (i = 1; i <= max_key + 1; i++) {
+ 		stars(starstr, data[i - 1], max_value, MAX_STARS);
+-		printf("%8ld -> %-8ld : %-8ld |%-*s|\n",
+-		       (1l << i) >> 1, (1l << i) - 1, data[i - 1],
++		printf("%8ld -> %-8ld : %-8lld |%-*s|\n",
++		       (1l << i) >> 1, (1l << i) - 1, (__u64)data[i - 1],
+ 		       MAX_STARS, starstr);
+ 	}
+
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 8/11] samples/bpf: fix false-positive right-shift
+ underflow warnings
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:41 +0000
+Message-Id: <20220421003152.339542-9-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+On 32 bit systems, shifting an unsigned long by 32 positions
+yields the following warning:
+
+samples/bpf/tracex2_kern.c:60:23: warning: shift count >= width of type [-Wshift-count-overflow]
+        unsigned int hi = v >> 32;
+                            ^  ~~
+
+sizeof(long) is always 8 for the BPF architecture, so this is not
+correct, but the BPF samples Makefile still uses the Clang native +
+LLC combo which enforces that.
+Until the samples are switched to `-target bpf`, do it the usual
+way: shift by 16 two times (see upper_32_bits() macro in the
+kernel).
+
+Fixes: d822a1926849 ("samples/bpf: Add counting example for kfree_skb() function calls and the write() syscall")
+Fixes: 0fb1170ee68a ("bpf: BPF based latency tracing")
+Fixes: f74599f7c530 ("bpf: Add tests and samples for LWT-BPF")
+Acked-by: Song Liu <songliubraving@fb.com>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ samples/bpf/lathist_kern.c      | 2 +-
+ samples/bpf/lwt_len_hist_kern.c | 2 +-
+ samples/bpf/tracex2_kern.c      | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/samples/bpf/lathist_kern.c b/samples/bpf/lathist_kern.c
+index 4adfcbbe6ef4..9744ed547abe 100644
+--- a/samples/bpf/lathist_kern.c
++++ b/samples/bpf/lathist_kern.c
+@@ -53,7 +53,7 @@ static unsigned int log2(unsigned int v)
+
+ static unsigned int log2l(unsigned long v)
+ {
+-	unsigned int hi = v >> 32;
++	unsigned int hi = (v >> 16) >> 16;
+
+ 	if (hi)
+ 		return log2(hi) + 32;
+diff --git a/samples/bpf/lwt_len_hist_kern.c b/samples/bpf/lwt_len_hist_kern.c
+index 1fa14c54963a..bf32fa04c91f 100644
+--- a/samples/bpf/lwt_len_hist_kern.c
++++ b/samples/bpf/lwt_len_hist_kern.c
+@@ -49,7 +49,7 @@ static unsigned int log2(unsigned int v)
+
+ static unsigned int log2l(unsigned long v)
+ {
+-	unsigned int hi = v >> 32;
++	unsigned int hi = (v >> 16) >> 16;
+ 	if (hi)
+ 		return log2(hi) + 32;
+ 	else
+diff --git a/samples/bpf/tracex2_kern.c b/samples/bpf/tracex2_kern.c
+index 5bc696bac27d..6bf22056ff95 100644
+--- a/samples/bpf/tracex2_kern.c
++++ b/samples/bpf/tracex2_kern.c
+@@ -57,7 +57,7 @@ static unsigned int log2(unsigned int v)
+
+ static unsigned int log2l(unsigned long v)
+ {
+-	unsigned int hi = v >> 32;
++	unsigned int hi = (v >> 16) >> 16;
+ 	if (hi)
+ 		return log2(hi) + 32;
+ 	else
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 9/11] samples/bpf: fix include order for non-Glibc
+ environments
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:46 +0000
+Message-Id: <20220421003152.339542-10-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Some standard C library implementations, e.g. Musl, ship the UAPI
+definitions themselves to not be dependent on the UAPI headers and
+their versions. Their kernel UAPI counterparts are usually guarded
+with some definitions which the formers set in order to avoid
+duplicate definitions.
+In such cases, include order matters. Change it in two samples: in
+the first, kernel UAPI ioctl definitions should go before the libc
+ones, and the opposite story with the second, where the kernel
+includes should go later to avoid struct redefinitions.
+
+Fixes: b4b8faa1ded7 ("samples/bpf: sample application and documentation for AF_XDP sockets")
+Fixes: e55190f26f92 ("samples/bpf: Fix build for task_fd_query_user.c")
+Acked-by: Song Liu <songliubraving@fb.com>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ samples/bpf/task_fd_query_user.c | 2 +-
+ samples/bpf/xdpsock_user.c       | 3 ++-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/samples/bpf/task_fd_query_user.c b/samples/bpf/task_fd_query_user.c
+index c9a0ca8351fd..c0ecca01d890 100644
+--- a/samples/bpf/task_fd_query_user.c
++++ b/samples/bpf/task_fd_query_user.c
+@@ -9,11 +9,11 @@
+ #include <stdint.h>
+ #include <fcntl.h>
+ #include <linux/bpf.h>
++#include <linux/perf_event.h>
+ #include <sys/ioctl.h>
+ #include <sys/resource.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+-#include <linux/perf_event.h>
+
+ #include <bpf/bpf.h>
+ #include <bpf/libbpf.h>
+diff --git a/samples/bpf/xdpsock_user.c b/samples/bpf/xdpsock_user.c
+index 6f3fe30ad283..9747d47a0a8f 100644
+--- a/samples/bpf/xdpsock_user.c
++++ b/samples/bpf/xdpsock_user.c
+@@ -7,14 +7,15 @@
+ #include <linux/bpf.h>
+ #include <linux/if_link.h>
+ #include <linux/if_xdp.h>
+-#include <linux/if_ether.h>
+ #include <linux/ip.h>
+ #include <linux/limits.h>
++#include <linux/net.h>
+ #include <linux/udp.h>
+ #include <arpa/inet.h>
+ #include <locale.h>
+ #include <net/ethernet.h>
+ #include <netinet/ether.h>
++#include <linux/if_ether.h>
+ #include <net/if.h>
+ #include <poll.h>
+ #include <pthread.h>
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 10/11] samples/bpf: fix -Wsequence-point
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:51 +0000
+Message-Id: <20220421003152.339542-11-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+In some libc implementations, CPU_SET() may utilize its first
+argument several times. When combined with a post-increment,
+it leads to:
+
+samples/bpf/test_lru_dist.c:233:36: warning: operation on 'next_to_try' may be undefined [-Wsequence-point]
+  233 |                 CPU_SET(next_to_try++, &cpuset);
+      |                                    ^
+
+Macros must always define local copies of arguments to avoid
+reusing, but since several libc versions already and still have
+that, split the sentence into two standalone operations to fix
+this.
+
+Fixes: 5db58faf989f ("bpf: Add tests for the LRU bpf_htab")
+Acked-by: Song Liu <songliubraving@fb.com>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ samples/bpf/test_lru_dist.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/samples/bpf/test_lru_dist.c b/samples/bpf/test_lru_dist.c
+index 75e877853596..d09ccd5370e8 100644
+--- a/samples/bpf/test_lru_dist.c
++++ b/samples/bpf/test_lru_dist.c
+@@ -230,7 +230,8 @@ static int sched_next_online(int pid, int next_to_try)
+
+ 	while (next_to_try < nr_cpus) {
+ 		CPU_ZERO(&cpuset);
+-		CPU_SET(next_to_try++, &cpuset);
++		CPU_SET(next_to_try, &cpuset);
++		next_to_try++;
+ 		if (!sched_setaffinity(pid, sizeof(cpuset), &cpuset))
+ 			break;
+ 	}
+--
+2.36.0
+
+From git@z Thu Jan  1 00:00:00 1970
+Subject: [PATCH v2 11/11] samples/bpf: xdpsock: fix -Wmaybe-uninitialized
+From: Alexander Lobakin <alobakin@pm.me>
+Date: Thu, 21 Apr 2022 00:39:57 +0000
+Message-Id: <20220421003152.339542-12-alobakin@pm.me>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Fix two sort-of-false-positives in the xdpsock userspace part:
+
+samples/bpf/xdpsock_user.c: In function 'main':
+samples/bpf/xdpsock_user.c:1531:47: warning: 'tv_usec' may be used uninitialized in this function [-Wmaybe-uninitialized]
+ 1531 |                         pktgen_hdr->tv_usec = htonl(tv_usec);
+      |                                               ^~~~~~~~~~~~~~
+samples/bpf/xdpsock_user.c:1500:26: note: 'tv_usec' was declared here
+ 1500 |         u32 idx, tv_sec, tv_usec;
+      |                          ^~~~~~~
+samples/bpf/xdpsock_user.c:1530:46: warning: 'tv_sec' may be used uninitialized in this function [-Wmaybe-uninitialized]
+ 1530 |                         pktgen_hdr->tv_sec = htonl(tv_sec);
+      |                                              ^~~~~~~~~~~~~
+samples/bpf/xdpsock_user.c:1500:18: note: 'tv_sec' was declared here
+ 1500 |         u32 idx, tv_sec, tv_usec;
+      |                  ^~~~~~
+
+Both variables are always initialized when @opt_tstamp == true and
+they're being used also only when @opt_tstamp == true. However, that
+variable comes from the BSS and is being toggled from another
+function. They can't be executed simultaneously to actually trigger
+undefined behaviour, but purely technically it is a correct warning.
+Just initialize them with zeroes.
+
+Fixes: eb68db45b747 ("samples/bpf: xdpsock: Add timestamp for Tx-only operation")
+Acked-by: Maciej Fijalkowski <maciej.fijalkowski@intel.com>
+Acked-by: Song Liu <songliubraving@fb.com>
+Signed-off-by: Alexander Lobakin <alobakin@pm.me>
+---
+ samples/bpf/xdpsock_user.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/samples/bpf/xdpsock_user.c b/samples/bpf/xdpsock_user.c
+index 9747d47a0a8f..a6d8291c8b38 100644
+--- a/samples/bpf/xdpsock_user.c
++++ b/samples/bpf/xdpsock_user.c
+@@ -1497,7 +1497,7 @@ static void rx_drop_all(void)
+ static int tx_only(struct xsk_socket_info *xsk, u32 *frame_nb,
+ 		   int batch_size, unsigned long tx_ns)
+ {
+-	u32 idx, tv_sec, tv_usec;
++	u32 idx, tv_sec = 0, tv_usec = 0;
+ 	unsigned int i;
+
+ 	while (xsk_ring_prod__reserve(&xsk->tx, batch_size, &idx) <
+--
+2.36.0
+

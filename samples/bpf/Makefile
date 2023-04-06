@@ -10,7 +10,6 @@ tprogs-y += fds_example
 tprogs-y += sockex1
 tprogs-y += sockex2
 tprogs-y += sockex3
-tprogs-y += helloworld
 tprogs-y += tracex1
 tprogs-y += tracex2
 tprogs-y += tracex3
@@ -56,6 +55,7 @@ tprogs-y += task_fd_query
 tprogs-y += xdp_sample_pkts
 tprogs-y += ibumad
 tprogs-y += hbm
+tprogs-y += helloworld
 
 # Libbpf dependencies
 LIBBPF = $(TOOLS_PATH)/lib/bpf/libbpf.a
@@ -67,7 +67,6 @@ fds_example-objs := fds_example.o
 sockex1-objs := sockex1_user.o
 sockex2-objs := sockex2_user.o
 sockex3-objs := sockex3_user.o
-helloworld-objs := helloworld_user.o
 tracex1-objs := tracex1_user.o $(TRACE_HELPERS)
 tracex2-objs := tracex2_user.o
 tracex3-objs := tracex3_user.o
@@ -115,13 +114,13 @@ task_fd_query-objs := task_fd_query_user.o $(TRACE_HELPERS)
 xdp_sample_pkts-objs := xdp_sample_pkts_user.o
 ibumad-objs := ibumad_user.o
 hbm-objs := hbm.o $(CGROUP_HELPERS)
+helloworld-objs := helloworld_user.o
 
 # Tell kbuild to always build the programs
 always-y := $(tprogs-y)
 always-y += sockex1_kern.o
 always-y += sockex2_kern.o
 always-y += sockex3_kern.o
-always-y += helloworld_kern.o
 always-y += tracex1_kern.o
 always-y += tracex2_kern.o
 always-y += tracex3_kern.o
@@ -177,6 +176,7 @@ always-y += ibumad_kern.o
 always-y += hbm_out_kern.o
 always-y += hbm_edt_kern.o
 always-y += xdpsock_kern.o
+always-y += helloworld_kern.o
 
 ifeq ($(ARCH), arm)
 # Strip all except -D__LINUX_ARM_ARCH__ option needed to handle linux
