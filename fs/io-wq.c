@@ -16,6 +16,7 @@
 #include <linux/rculist_nulls.h>
 #include <linux/cpu.h>
 #include <linux/tracehook.h>
+#include <linux/audit.h>
 
 #include "io-wq.h"
 
@@ -535,6 +536,8 @@ static int io_wqe_worker(void *data)
 	snprintf(buf, sizeof(buf), "iou-wrk-%d", wq->task->pid);
 	set_task_comm(current, buf);
 
+	audit_alloc_kernel(current);
+
 	while (!test_bit(IO_WQ_BIT_EXIT, &wq->state)) {
 		long ret;
 
@@ -573,6 +576,7 @@ loop:
 			raw_spin_unlock_irq(&wqe->lock);
 	}
 
+	audit_free(current);
 	io_worker_exit(worker);
 	return 0;
 }

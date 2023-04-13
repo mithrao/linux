@@ -78,6 +78,7 @@
 #include <linux/task_work.h>
 #include <linux/pagemap.h>
 #include <linux/io_uring.h>
+#include <linux/audit.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/io_uring.h>
@@ -6110,6 +6111,9 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 	if (req->work.creds && req->work.creds != current_cred())
 		creds = override_creds(req->work.creds);
 
+	if (req->opcode < IORING_OP_LAST)
+		audit_uring_entry(req->opcode);
+
 	switch (req->opcode) {
 	case IORING_OP_NOP:
 		ret = io_nop(req, issue_flags);
@@ -6215,6 +6219,9 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 		ret = -EINVAL;
 		break;
 	}
+
+	if (req->opcode < IORING_OP_LAST)
+		audit_uring_exit(!ret, ret);
 
 	if (creds)
 		revert_creds(creds);
@@ -6832,6 +6839,8 @@ static int io_sq_thread(void *data)
 		set_cpus_allowed_ptr(current, cpu_online_mask);
 	current->flags |= PF_NO_SETAFFINITY;
 
+	audit_alloc_kernel(current);
+
 	mutex_lock(&sqd->lock);
 	/* a user may had exited before the thread started */
 	io_run_task_work_head(&sqd->park_task_work);
@@ -6920,6 +6929,8 @@ static int io_sq_thread(void *data)
 	io_run_task_work();
 	io_run_task_work_head(&sqd->park_task_work);
 	mutex_unlock(&sqd->lock);
+
+	audit_free(current);
 
 	complete(&sqd->exited);
 	do_exit(0);

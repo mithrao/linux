@@ -952,6 +952,7 @@ static void audit_reset_context(struct audit_context *ctx)
 	ctx->current_state = ctx->state;
 	ctx->serial = 0;
 	ctx->major = 0;
+	ctx->uring_op = 0;
 	ctx->ctime = (struct timespec64) { .tv_sec = 0, .tv_nsec = 0 };
 	memset(ctx->argv, 0, sizeof(ctx->argv));
 	ctx->return_code = 0;
@@ -1037,6 +1038,31 @@ int audit_alloc(struct task_struct *tsk)
 	return 0;
 }
 
+/**
+ * audit_alloc_kernel - allocate an audit_context for a kernel task
+ * @tsk: the kernel task
+ * 
+ * Similar to the audit_alloc() function, but intended for kernel private
+ * threads. Returns zero on success, negative values on failure.
+ */
+int audit_alloc_kernel(struct task_struct *tsk)
+{
+	/*
+	 * At the moment we are just going to call into audit_alloc() to
+	 * simplify the code, but there two things to keep in mind with this
+	 * approach:
+	 * 
+	 * 1. Filtering interanl kernel tasks is a bit laughable in almost all
+	 * cases, but there is at least one case where there is benefit:
+	 * the '-a task,never' case allows the admin to effectively disable
+	 * task auditing at runtime.
+	 * 
+	 * 2. The {set,clear}_task_syscall_work() ops likely have zero effect 
+	 * on these internel kernel tasks, but they probably don't hurt either.
+	 */
+	return audit_alloc(tsk);
+}
+
 static inline void audit_free_context(struct audit_context *context)
 {\
 	/* resetting is extra work, but it is likely just noise */
@@ -1044,6 +1070,52 @@ static inline void audit_free_context(struct audit_context *context)
 	free_tree_refs(context);
 	kfree(context->filterkey);
 	kfree(context);
+}
+
+/**
+ * audit_log_uring - generate a AUDIT_URINGOP record
+ * @ctx: the audit context
+ */
+static void audit_log_uring(struct audit_context *ctx)
+{
+	struct audit_buffer *ab;
+	const struct cred *cred;
+
+	/*
+	 * TODO: What do we log here?  I'm tossing in a few things to start the
+	 * 	     conversation, but additional thought needs to go into this.
+	 */
+
+	ab = audit_log_start(ctx, GFP_KERNEL, AUDIT_URINGOP);
+	if (!ab)
+		return;
+	cred = current_cred();
+	audit_log_format(ab, "uring_op=%d", ctx->uring_op);
+	if (ctx->return_valid != AUDITSC_INVALID)
+		audit_log_format(ab, " success=%s exit=%ld",
+						(ctx->return_valid == AUDITSC_SUCCESS ?
+						"yes" : "no"),
+						ctx->return_code);
+	audit_log_format(ab,
+			 " items=%d"
+			 " ppid=%d pid=%d auid=%u uid=%u gid=%u"
+			 " euid=%u suid=%u fsuid=%u"
+			 " egid=%u sgid=%u fsgid=%u",
+			 ctx->name_count,
+			 task_ppid_nr(current),
+			 task_tgid_nr(current),
+			 from_kuid(&init_user_ns, audit_get_loginuid(current)),
+			 from_kuid(&init_user_ns, cred->uid),
+			 from_kgid(&init_user_ns, cred->gid),
+			 from_kuid(&init_user_ns, cred->euid),
+			 from_kuid(&init_user_ns, cred->suid),
+			 from_kuid(&init_user_ns, cred->fsuid),
+			 from_kgid(&init_user_ns, cred->egid),
+			 from_kgid(&init_user_ns, cred->sgid),
+			 from_kgid(&init_user_ns, cred->fsgid));
+	audit_log_task_context(ab);
+	audit_log_key(ab, ctx->filterkey);
+	audit_log_end(ab);
 }
 
 static int audit_log_pid_context(struct audit_context *context, pid_t pid,
@@ -1570,6 +1642,9 @@ static void audit_log_exit(void)
 			audit_log_key(ab, context->filterkey);
 			audit_log_end(ab);
 			break;
+		case AUDIT_CTX_URING:
+			audit_log_uring(context);
+			break;
 		default:
 			BUG();
 			break;
@@ -1737,6 +1812,95 @@ static void audit_return_fixup(struct audit_context *ctx,
 	else
 		ctx->return_code = code;
 	ctx->return_valid = (success ? AUDITSC_SUCCESS : AUDITSC_FAILURE);
+}
+
+/**
+ * __audit_uring_entry - prepare the kernel task's audit context for io_uring
+ * @op: the io_uring opcode
+ * 
+ * This is similar to audit_syscall_entry() but is intended for use by io_uring
+ * operations.
+ */
+void __audit_uring_entry(u8 op)
+{
+	struct audit_context *ctx = audit_context();
+
+	if (!audit_enabled || !ctx || ctx->state == AUDIT_DISABLED)
+		return;
+	/*
+	 * NOTE: It's possible that we can called from the process' context
+	 * 		 before it returns to userspace, and before audit_syscall_exit()
+	 * 		 is called. In this case there is not much to do, just record 
+	 * 		 the io_uring detals and return. 
+	 */
+	ctx->uring_op = op;
+	if (ctx->context == AUDIT_CTX_SYSCALL)
+		return;
+	ctx->arch = syscall_get_arch(current);
+	ctx->context = AUDIT_CTX_URING;
+	ctx->current_state = ctx->state;
+	ktime_get_coarse_real_ts64(&ctx->ctime);
+}
+
+/**
+ * __audit_uring_exit - wrap up the kernel task's audit context after io_uring
+ * @success: true/false value to indicate if the operation succeeded or not
+ * @code: operation return code
+ * 
+ * This is similar to audit_syscall_exit() but is intended for use by io_uring
+ * operations.
+ */
+void __audit_uring_exit(int success, long code)
+{
+	struct audit_context *ctx = audit_context();
+
+	/*
+	 * TODO: At some point we will likely want to filter on io_uring ops
+	 * 		 and other things similar to what we do for syscalls, but that 
+	 * 		 is something for another day; just record we can here.
+	 */
+	if (!ctx || ctx->dummy)
+		goto out;
+	if (ctx->context == AUDIT_CTX_SYSCALL) {
+		/*
+		 * NOTE: See the note in __audit_uring_entry() about the case
+		 * 		 where we may be called from process context before we
+		 * 		 return to userspace via audit_syscall_exit(). In this
+		 * 		 we simply emit a URINGOP record and bail, the 
+		 * 		 normal syscall exit handling will take care of
+		 * 		 everything else.
+		 * 		 It is also worth mentioning that when we are called,
+		 * 		 the current process creds may differ from the creds 
+		 * 		 used during the normal syscall processing; keep that
+		 * 		 in mind if/when we move the record generation code.
+		 */
+
+		/*
+		 * We need to filter on the syscall info here to decide if we
+		 * should emit a URINGOP record. I know it seems odd but this
+		 * solves the problem where users have a filter to block *all*
+		 * syscall records in the "exit" filter; we want to preserve
+		 * the behaviour here. 
+		 */
+		audit_filter_syscall(current, ctx);
+		audit_filter_inodes(current, ctx);
+		if (ctx->current_state != AUDIT_RECORD_CONTEXT)
+			return;
+		audit_log_uring(ctx);
+		return;
+	}
+	
+	/* this may generate CONFIG_CHANGE records */
+	if (!list_empty(&ctx->killed_trees))
+		audit_kill_trees(ctx);
+	
+	audit_filter_inodes(current, ctx);
+	if (ctx->current_state != AUDIT_RECORD_CONTEXT)
+		goto out;
+	audit_return_fixup(ctx, success, code);
+	audit_log_exit();
+out:
+	audit_reset_context(ctx);
 }
 
 /**

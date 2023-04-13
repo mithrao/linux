@@ -286,7 +286,10 @@ static inline int audit_signal_info(int sig, struct task_struct *t)
 /* These are defined in auditsc.c */
 				/* Public API */
 extern int  audit_alloc(struct task_struct *task);
+extern int audit_alloc_kernel(struct task_struct *task);
 extern void __audit_free(struct task_struct *task);
+extern void __audit_uring_entry(u8 op);
+extern void __audit_uring_exit(int success, long code);
 extern void __audit_syscall_entry(int major, unsigned long a0, unsigned long a1,
 				  unsigned long a2, unsigned long a3);
 extern void __audit_syscall_exit(int ret_success, long ret_value);
@@ -322,6 +325,16 @@ static inline void audit_free(struct task_struct *task)
 {
 	if (unlikely(task->audit_context))
 		__audit_free(task);
+}
+static inline void audit_uring_entry(u8 op)
+{
+	if (unlikely(audit_context()))
+		__audit_uring_entry(op);
+}
+static inline void audit_uring_exit(int success, long code)
+{
+	if (unlikely(audit_context()))
+		__audit_uring_exit(success, code);
 }
 static inline void audit_syscall_entry(int major, unsigned long a0,
 				       unsigned long a1, unsigned long a2,
@@ -551,6 +564,10 @@ extern int audit_n_rules;
 extern int audit_signals;
 #else /* CONFIG_AUDITSYSCALL */
 static inline int audit_alloc(struct task_struct *task)
+{
+	return 0;
+}
+static int audit_alloc_kernel(struct task_struct *task)
 {
 	return 0;
 }
