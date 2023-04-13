@@ -44,7 +44,8 @@ struct list_head audit_filter_list[AUDIT_NR_FILTERS] = {
 	LIST_HEAD_INIT(audit_filter_list[4]),
 	LIST_HEAD_INIT(audit_filter_list[5]),
 	LIST_HEAD_INIT(audit_filter_list[6]),
-#if AUDIT_NR_FILTERS != 7
+	LIST_HEAD_INIT(audit_filter_list[7]),
+#if AUDIT_NR_FILTERS != 8
 #error Fix audit_filter_list initialiser
 #endif
 };
@@ -56,6 +57,7 @@ static struct list_head audit_rules_list[AUDIT_NR_FILTERS] = {
 	LIST_HEAD_INIT(audit_rules_list[4]),
 	LIST_HEAD_INIT(audit_rules_list[5]),
 	LIST_HEAD_INIT(audit_rules_list[6]),
+	LIST_HEAD_INIT(audit_rules_list[7]),
 };
 
 DEFINE_MUTEX(audit_filter_mutex);

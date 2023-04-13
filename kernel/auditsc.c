@@ -799,6 +799,35 @@ static int audit_in_mask(const struct audit_krule *rule, unsigned long val)
 	return rule->mask[word] & bit;
 }
 
+/**
+ * audit_filter_uring - apply filters to an io_uring operation
+ * @tsk: associated task
+ * @ctx: audit context
+ */
+static void audit_filter_uring(struct task_struct *tsk,
+							struct audit_context *ctx)
+{
+	struct audit_entry *e;
+	enum audit_state state;
+
+	if (auditd_test_task(tsk))
+		return;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(e, &audit_filter_list[AUDIT_FILTER_URING_EXIT],
+							list) {
+		if (audit_in_mask(&e->rule, ctx->uring_op) && 
+			audit_filter_rules(tsk, &e->rule, ctx, NULL, &state,
+							false)) {
+			rcu_read_unlock();
+			ctx->current_state = state;
+			return;
+		}
+	}
+	rcu_read_unlock();
+	return;
+}
+
 /* At syscall exit time, this filter is called if the audit_state is
  * not low enough that auditing cannot take place, but is also not
  * high enough that we already know we have to write an audit record
@@ -1753,7 +1782,7 @@ static void audit_log_exit(void)
  * __audit_free - free a per-task audit context
  * @tsk: task whose audit context block to free
  *
- * Called from copy_process and do_exit
+ * Called from copy_process, do_exit, and the io_uring code
  */
 void __audit_free(struct task_struct *tsk)
 {
@@ -1771,15 +1800,25 @@ void __audit_free(struct task_struct *tsk)
 	 * random task_struct that doesn't doesn't have any meaningful data we
 	 * need to log via audit_log_exit().
 	 */
-	if (tsk == current && !context->dummy && 
-		context->context == AUDIT_CTX_SYSCALL) {
+	if (tsk == current && !context->dummy) {
 		context->return_valid = AUDITSC_INVALID;
 		context->return_code = 0;
 
-		audit_filter_syscall(tsk, context);
-		audit_filter_inodes(tsk, context);
-		if (context->current_state == AUDIT_RECORD_CONTEXT)
-			audit_log_exit();
+		if (context->current_state == AUDIT_CTX_SYSCALL) {
+			audit_filter_syscall(tsk, context);
+			audit_filter_inodes(tsk, context);
+			if (context->current_state == AUDIT_RECORD_CONTEXT)
+				audit_log_exit();
+		} else if (context->context == AUDIT_CTX_URING) {
+			/* 
+			  TODO: verify this case is real and valid
+			 */
+			audit_filter_uring(tsk, context);
+			audit_filter_inodes(tsk, context);
+			if (context->current_state == AUDIT_RECORD_CONTEXT)
+				audit_log_uring(context);
+		}
+		
 	}
 
 	audit_set_context(tsk, NULL);
@@ -1854,11 +1893,6 @@ void __audit_uring_exit(int success, long code)
 {
 	struct audit_context *ctx = audit_context();
 
-	/*
-	 * TODO: At some point we will likely want to filter on io_uring ops
-	 * 		 and other things similar to what we do for syscalls, but that 
-	 * 		 is something for another day; just record we can here.
-	 */
 	if (!ctx || ctx->dummy)
 		goto out;
 	if (ctx->context == AUDIT_CTX_SYSCALL) {
@@ -1883,6 +1917,8 @@ void __audit_uring_exit(int success, long code)
 		 * the behaviour here. 
 		 */
 		audit_filter_syscall(current, ctx);
+		if (ctx->current_state != AUDIT_RECORD_CONTEXT)
+			audit_filter_uring(current, ctx);
 		audit_filter_inodes(current, ctx);
 		if (ctx->current_state != AUDIT_RECORD_CONTEXT)
 			return;
@@ -1891,14 +1927,20 @@ void __audit_uring_exit(int success, long code)
 	}
 
 #if 1
-		/* patch[3/9] - temporary hack to force record generation */
-		ctx->current_state = AUDIT_RECORD_CONTEXT;
+	/* patch[4/9] - 
+	 *				temporary hack to force record generation, we are leaving this
+	 *      		enabled, but if you want to actually test the filtering you
+	 * 				need to disable this #if/#endif block.
+	 */
+	ctx->current_state = AUDIT_RECORD_CONTEXT;
 #endif
 	
 	/* this may generate CONFIG_CHANGE records */
 	if (!list_empty(&ctx->killed_trees))
 		audit_kill_trees(ctx);
 	
+	/* run through both filters to ensure we set the filterkey properly */
+	audit_filter_uring(current, ctx);
 	audit_filter_inodes(current, ctx);
 	if (ctx->current_state != AUDIT_RECORD_CONTEXT)
 		goto out;
