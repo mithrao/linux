@@ -1889,6 +1889,11 @@ void __audit_uring_exit(int success, long code)
 		audit_log_uring(ctx);
 		return;
 	}
+
+#if 1
+		/* patch[3/9] - temporary hack to force record generation */
+		ctx->current_state = AUDIT_RECORD_CONTEXT;
+#endif
 	
 	/* this may generate CONFIG_CHANGE records */
 	if (!list_empty(&ctx->killed_trees))
