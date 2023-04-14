@@ -2624,3 +2624,36 @@ int security_perf_event_write(struct perf_event *event)
 	return call_int_hook(perf_event_write, 0, event);
 }
 #endif /* CONFIG_PERF_EVENTS */
+
+#ifdef CONFIG_IO_URING
+/**
+ * Controls if the current task, executing an io_uring operation,
+ * is allowed to override it's credentials with @cred. 
+ * - In cases where the current task is a user application, the 
+ *   current credentials will be those of the user application. 
+ * - In cases where the current task is a kernel thread servicing
+ *   io_uring requests, the current credentials will be those of
+ *   the io_uring ring (inherited from the process that created 
+ *   the ring)
+ */
+int security_uring_override_creds(const struct cred *new)
+{
+	return call_int_hook(uring_override_creds, 0, new);
+}
+
+/**
+ * Controls if the current task is allowed to create an io_uring
+ * polling thread (IORING_SETUP_SQPOLL). 
+ * - Without a SQPOLL thread in the kernel processes must submit 
+ *   I/O requests via io_uring_enter(2) which allows us to compare 
+ *   any requested credential changes against the application 
+ *   making the request.
+ * - With a SQPOLL thread, we can no longer compare requested
+ *   credential changes against the application making the request,
+ *   the comparison is made against the ring's credentials.
+ */
+int security_uring_sqpoll(void)
+{
+	return call_int_hook(uring_sqpoll, 0);
+}
+#endif /* CONFIG_IO_URING */
