@@ -4093,6 +4093,7 @@ union bpf_attr {
 	FN(iouring_emit_cqe),		\
 	FN(iouring_reap_cqe),		\
 	FN(copy_to_user),		\
+	FN(iouring_register_restrictions), \
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper

@@ -10439,6 +10439,14 @@ err:
 	return ret;
 }
 
+BPF_CALL_3(io_bpf_register_restrictions, struct io_bpf_ctx *, bpf_ctx,
+			struct io_uring_restriction *, res,
+			u32, nr_res)
+{
+	struct io_ring_ctx *ctx = bpf_ctx->ctx;
+	return io_register_restrictions(ctx, res, nr_res);
+}
+
 const struct bpf_func_proto io_bpf_queue_sqe_proto = {
 	.func = io_bpf_queue_sqe,
 	.gpl_only = false,
@@ -10469,6 +10477,15 @@ const struct bpf_func_proto io_bpf_reap_cqe_proto = {
 	.arg4_type = ARG_CONST_SIZE,
 };
 
+const struct bpf_func_proto io_bpf_register_restrictions_proto = {
+	.func = io_bpf_register_restrictions,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_MEM,
+	.arg3_type = ARG_CONST_SIZE,
+};
+
 static const struct bpf_func_proto *
 io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
@@ -10483,6 +10500,8 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &io_bpf_emit_cqe_proto;
 	case BPF_FUNC_iouring_reap_cqe:
 		return &io_bpf_reap_cqe_proto;
+	case BPF_FUNC_iouring_register_restrictions:
+		return &io_bpf_register_restrictions_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}
