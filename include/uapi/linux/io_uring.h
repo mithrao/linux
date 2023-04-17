@@ -413,4 +413,8 @@ struct cqring_bpf_ctx {
 	__u32	wait_idx;
 };
 
+struct sqring_bpf_ctx {
+	__u64 	user_data;
+};
+
 #endif

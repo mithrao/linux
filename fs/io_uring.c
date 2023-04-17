@@ -894,6 +894,12 @@ struct cq_bpf_ctx {
 	struct io_ring_ctx	*ctx;
 };
 
+/* bpf for submission queue */
+struct sq_bpf_ctx {
+	struct sqring_bpf_ctx u;
+	struct io_ring_ctx *ctx;
+};
+
 struct io_op_def {
 	/* needs req->file assigned */
 	unsigned		needs_file : 1;
@@ -8765,7 +8771,7 @@ static int io_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 		if (fd == -1)
 			continue;
 
-		prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_IOURING);
+		prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_CQRING);
 		if (IS_ERR(prog)) {
 			ret = PTR_ERR(prog);
 			break;
@@ -10566,7 +10572,7 @@ const struct bpf_func_proto io_bpf_register_enable_rings_proto = {
 };
 
 static const struct bpf_func_proto *
-io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+cq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
 	switch (func_id) {
 	case BPF_FUNC_copy_from_user:
@@ -10588,7 +10594,13 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	}
 }
 
-static bool io_bpf_is_valid_access(int off, int size,
+static const struct bpf_func_proto *
+sq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+{
+	return bpf_base_func_proto(func_id);
+}
+
+static bool cq_bpf_is_valid_access(int off, int size,
 				   enum bpf_access_type type,
 				   const struct bpf_prog *prog,
 				   struct bpf_insn_access_aux *info)
@@ -10609,11 +10621,34 @@ static bool io_bpf_is_valid_access(int off, int size,
 	return false;
 }
 
-const struct bpf_prog_ops iouring_prog_ops = {};
+static bool sq_bpf_is_valid_access(int off, int size,
+				   enum bpf_access_type type,
+				   const struct bpf_prog *prog,
+				   struct bpf_insn_access_aux *info)
+{
+	if (off < 0 || off >= sizeof(struct sqring_bpf_ctx))
+		return false;
+	if (off % size != 0)
+		return false;
 
-const struct bpf_verifier_ops iouring_verifier_ops = {
-	.get_func_proto		= io_bpf_func_proto,
-	.is_valid_access	= io_bpf_is_valid_access,
+	switch (off) {
+	case offsetof(struct sqring_bpf_ctx, user_data):
+		return size == sizeof_field(struct sqring_bpf_ctx, user_data);
+	}
+	return false;
+}
+
+const struct bpf_prog_ops cqring_prog_ops = {};
+const struct bpf_prog_ops sqring_prog_ops = {};
+
+const struct bpf_verifier_ops cqring_verifier_ops = {
+	.get_func_proto		= cq_bpf_func_proto,
+	.is_valid_access	= cq_bpf_is_valid_access,
+};
+
+const struct bpf_verifier_ops sqring_verifier_ops = {
+	.get_func_proto		= sq_bpf_func_proto,
+	.is_valid_access	= sq_bpf_is_valid_access,
 };
 
 static inline bool io_bpf_need_wake(struct io_async_bpf *abpf)
@@ -10778,9 +10813,11 @@ static int __init io_uring_init(void)
 	BUILD_BUG_SQE_ELEM(44, __s32,  splice_fd_in);
 	BUILD_BUG_SQE_ELEM(48, __u16,  cq_idx);
 
-	/* should be first, see io_bpf_is_valid_access() */
+	/* should be first, see cq/sq_bpf_is_valid_access() */
 	__BUILD_BUG_VERIFY_ELEMENT(struct cq_bpf_ctx, 0,
 				   struct cqring_bpf_ctx, u);
+	__BUILD_BUG_VERIFY_ELEMENT(struct sq_bpf_ctx, 0,
+				   struct sqring_bpf_ctx, u);
 
 	BUILD_BUG_ON(sizeof(struct io_uring_files_update) !=
 		     sizeof(struct io_uring_rsrc_update));
