@@ -407,7 +407,7 @@ struct io_uring_getevents_arg {
 	__u64	ts;
 };
 
-struct io_uring_bpf_ctx {
+struct cqring_bpf_ctx {
 	__u64	user_data;
 	__u32	wait_nr;
 	__u32	wait_idx;

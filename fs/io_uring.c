@@ -687,6 +687,7 @@ struct io_bpf {
 	struct bpf_prog			*prog;
 };
 
+/* async bpf program for completion queue */
 struct io_async_bpf {
 	struct wait_queue_entry		wqe;
 	unsigned int 			wait_nr;
@@ -887,8 +888,9 @@ struct io_defer_entry {
 	u32			seq;
 };
 
-struct io_bpf_ctx {
-	struct io_uring_bpf_ctx u;
+/* bpf for completion queue */
+struct cq_bpf_ctx {
+	struct cqring_bpf_ctx u;
 	struct io_ring_ctx	*ctx;
 };
 
@@ -8730,6 +8732,12 @@ static int io_bpf_unregister(struct io_ring_ctx *ctx)
 	return 0;
 }
 
+/**
+ * io_bpf_register
+ * @ctx: the io_uring to be registered
+ * @arg: pointer to the bpf programs
+ * @nr_args: the number of bpf programs to be registered
+ */
 static int io_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 			   unsigned int nr_args)
 {
@@ -10356,7 +10364,7 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 	return ret;
 }
 
-BPF_CALL_3(io_bpf_queue_sqe, struct io_bpf_ctx *,		bpf_ctx,
+BPF_CALL_3(io_bpf_queue_sqe, struct cq_bpf_ctx *,		bpf_ctx,
 			     const struct io_uring_sqe *,	sqe,
 			     u32,				sqe_len)
 {
@@ -10380,7 +10388,7 @@ BPF_CALL_3(io_bpf_queue_sqe, struct io_bpf_ctx *,		bpf_ctx,
 	return !io_submit_sqe(ctx, req, sqe);
 }
 
-BPF_CALL_5(io_bpf_emit_cqe, struct io_bpf_ctx *,		bpf_ctx,
+BPF_CALL_5(io_bpf_emit_cqe, struct cq_bpf_ctx *,		bpf_ctx,
 			    u32,				cq_idx,
 			    u64,				user_data,
 			    s32,				res,
@@ -10403,7 +10411,7 @@ BPF_CALL_5(io_bpf_emit_cqe, struct io_bpf_ctx *,		bpf_ctx,
 	return submitted ? 0 : -ENOMEM;
 }
 
-BPF_CALL_4(io_bpf_reap_cqe, struct io_bpf_ctx *,		bpf_ctx,
+BPF_CALL_4(io_bpf_reap_cqe, struct cq_bpf_ctx *,		bpf_ctx,
 			    u32,				cq_idx,
 			    struct io_uring_cqe *,		cqe_out,
 			    u32,				cqe_len)
@@ -10439,7 +10447,7 @@ err:
 	return ret;
 }
 
-BPF_CALL_3(io_bpf_register_restrictions, struct io_bpf_ctx *, bpf_ctx,
+BPF_CALL_3(io_bpf_register_restrictions, struct cq_bpf_ctx *, bpf_ctx,
 			struct io_uring_restriction *, res,
 			u32, nr_res)
 {
@@ -10504,7 +10512,7 @@ out:
 	return ret;
 }
 
-BPF_CALL_1(io_bpf_register_enable_rings, struct io_bpf_ctx *, bpf_ctx)
+BPF_CALL_1(io_bpf_register_enable_rings, struct cq_bpf_ctx *, bpf_ctx)
 {
 	struct io_ring_ctx *ctx = bpf_ctx->ctx;
 	int ret = io_register_enable_rings(ctx);
@@ -10585,18 +10593,18 @@ static bool io_bpf_is_valid_access(int off, int size,
 				   const struct bpf_prog *prog,
 				   struct bpf_insn_access_aux *info)
 {
-	if (off < 0 || off >= sizeof(struct io_uring_bpf_ctx))
+	if (off < 0 || off >= sizeof(struct cqring_bpf_ctx))
 		return false;
 	if (off % size != 0)
 		return false;
 
 	switch (off) {
-	case offsetof(struct io_uring_bpf_ctx, user_data):
-		return size == sizeof_field(struct io_uring_bpf_ctx, user_data);
-	case offsetof(struct io_uring_bpf_ctx, wait_nr):
-		return size == sizeof_field(struct io_uring_bpf_ctx, wait_nr);
-	case offsetof(struct io_uring_bpf_ctx, wait_idx):
-		return size == sizeof_field(struct io_uring_bpf_ctx, wait_idx);
+	case offsetof(struct cqring_bpf_ctx, user_data):
+		return size == sizeof_field(struct cqring_bpf_ctx, user_data);
+	case offsetof(struct cqring_bpf_ctx, wait_nr):
+		return size == sizeof_field(struct cqring_bpf_ctx, wait_nr);
+	case offsetof(struct cqring_bpf_ctx, wait_idx):
+		return size == sizeof_field(struct cqring_bpf_ctx, wait_idx);
 	}
 	return false;
 }
@@ -10665,7 +10673,7 @@ static int io_bpf_wait_cq_async(struct io_kiocb *req, unsigned int nr,
 static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_ring_ctx *ctx = req->ctx;
-	struct io_bpf_ctx bpf_ctx;
+	struct cq_bpf_ctx bpf_ctx;
 	struct bpf_prog *prog;
 	int ret = -EAGAIN;
 
@@ -10771,8 +10779,8 @@ static int __init io_uring_init(void)
 	BUILD_BUG_SQE_ELEM(48, __u16,  cq_idx);
 
 	/* should be first, see io_bpf_is_valid_access() */
-	__BUILD_BUG_VERIFY_ELEMENT(struct io_bpf_ctx, 0,
-				   struct io_uring_bpf_ctx, u);
+	__BUILD_BUG_VERIFY_ELEMENT(struct cq_bpf_ctx, 0,
+				   struct cqring_bpf_ctx, u);
 
 	BUILD_BUG_ON(sizeof(struct io_uring_files_update) !=
 		     sizeof(struct io_uring_rsrc_update));
