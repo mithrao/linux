@@ -10444,7 +10444,71 @@ BPF_CALL_3(io_bpf_register_restrictions, struct io_bpf_ctx *, bpf_ctx,
 			u32, nr_res)
 {
 	struct io_ring_ctx *ctx = bpf_ctx->ctx;
-	return io_register_restrictions(ctx, res, nr_res);
+	size_t size;
+	int i, ret;
+
+	/* Restrictions allowed only if rings started disabled */
+	if (!(ctx->flags & IORING_SETUP_R_DISABLED))
+		return -EBADFD;
+
+	/* We allow only a single restrictions registration */
+	if (ctx->restrictions.registered)
+		return -EBUSY;
+
+	if (!res || nr_res > IORING_MAX_RESTRICTIONS)
+		return -EINVAL;
+
+	size = array_size(nr_res, sizeof(*res));
+	if (size == SIZE_MAX)
+		return -EOVERFLOW;
+
+	ret = 0;
+
+	for (i = 0; i < nr_res; i++) {
+		switch (res[i].opcode) {
+		case IORING_RESTRICTION_REGISTER_OP:
+			if (res[i].register_op >= IORING_REGISTER_LAST) {
+				ret = -EINVAL;
+				goto out;
+			}
+
+			__set_bit(res[i].register_op,
+				  ctx->restrictions.register_op);
+			break;
+		case IORING_RESTRICTION_SQE_OP:
+			if (res[i].sqe_op >= IORING_OP_LAST) {
+				ret = -EINVAL;
+				goto out;
+			}
+
+			__set_bit(res[i].sqe_op, ctx->restrictions.sqe_op);
+			break;
+		case IORING_RESTRICTION_SQE_FLAGS_ALLOWED:
+			ctx->restrictions.sqe_flags_allowed = res[i].sqe_flags;
+			break;
+		case IORING_RESTRICTION_SQE_FLAGS_REQUIRED:
+			ctx->restrictions.sqe_flags_required = res[i].sqe_flags;
+			break;
+		default:
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+out:
+	/* Reset all restrictions if an error happened */
+	if (ret != 0)
+		memset(&ctx->restrictions, 0, sizeof(ctx->restrictions));
+	else
+		ctx->restrictions.registered = true;
+	return ret;
+}
+
+BPF_CALL_1(io_bpf_register_enable_rings, struct io_bpf_ctx *, bpf_ctx)
+{
+	struct io_ring_ctx *ctx = bpf_ctx->ctx;
+	int ret = io_register_enable_rings(ctx);
+	return ret;
 }
 
 const struct bpf_func_proto io_bpf_queue_sqe_proto = {
@@ -10482,8 +10546,15 @@ const struct bpf_func_proto io_bpf_register_restrictions_proto = {
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 	.arg1_type = ARG_PTR_TO_CTX,
-	.arg2_type = ARG_PTR_TO_MEM,
-	.arg3_type = ARG_CONST_SIZE,
+	.arg2_type = ARG_ANYTHING,
+	.arg3_type = ARG_ANYTHING,
+};
+
+const struct bpf_func_proto io_bpf_register_enable_rings_proto = {
+	.func = io_bpf_register_enable_rings,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
 };
 
 static const struct bpf_func_proto *
@@ -10502,6 +10573,8 @@ io_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &io_bpf_reap_cqe_proto;
 	case BPF_FUNC_iouring_register_restrictions:
 		return &io_bpf_register_restrictions_proto;
+	case BPF_FUNC_iouring_register_enable_rings:
+		return &io_bpf_register_enable_rings_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}

@@ -4094,6 +4094,7 @@ union bpf_attr {
 	FN(iouring_reap_cqe),		\
 	FN(copy_to_user),		\
 	FN(iouring_register_restrictions), \
+	FN(iouring_register_enable_rings), \
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
