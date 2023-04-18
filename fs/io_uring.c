@@ -418,9 +418,13 @@ struct io_ring_ctx {
 	struct xarray		personalities;
 	u32			pers_next;
 
-	/* bpf programs */
-	unsigned		nr_cq_bpf_progs;
+	/* bpf programs for completion queue */
+	unsigned			nr_cq_bpf_progs;
 	struct io_bpf_prog	*cq_bpf_progs;
+
+	/* bpf programs for submission queue */
+	unsigned			nr_sq_bpf_progs;
+	struct io_bpf_prog  *sq_bpf_progs;
 
 	struct fasync_struct	*cq_fasync;
 	struct eventfd_ctx	*cq_ev_fd;
@@ -688,10 +692,14 @@ struct io_bpf {
 };
 
 /* async bpf program for completion queue */
-struct io_async_bpf {
+struct cq_async_bpf {
 	struct wait_queue_entry		wqe;
 	unsigned int 			wait_nr;
 	unsigned int 			wait_idx;
+};
+
+/* async bpf program for submission queue */
+struct sq_async_bpf {
 };
 
 struct io_completion {
@@ -1064,9 +1072,10 @@ static const struct io_op_def io_op_defs[] = {
 	},
 	[IORING_OP_RENAMEAT] = {},
 	[IORING_OP_UNLINKAT] = {},
-	[IORING_OP_BPF] = {
-		.async_size		= sizeof(struct io_async_bpf),
+	[IORING_OP_CQ_BPF] = {
+		.async_size		= sizeof(struct cq_async_bpf),
 	},
+	[IORING_OP_SQ_BPF] = {},
 };
 
 static bool io_disarm_next(struct io_kiocb *req);
@@ -3960,7 +3969,7 @@ static int io_openat(struct io_kiocb *req, unsigned int issue_flags)
 	return io_openat2(req, issue_flags);
 }
 
-static int io_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+static int io_cq_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
 	struct io_ring_ctx *ctx = req->ctx;
 	struct bpf_prog *prog;
@@ -3987,6 +3996,11 @@ static int io_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 	return 0;
 }
 
+static int io_sq_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
+{
+	return 0;
+}
+
 static void io_bpf_run_task_work(struct callback_head *cb)
 {
 	struct io_kiocb *req = container_of(cb, struct io_kiocb, task_work);
@@ -3997,7 +4011,17 @@ static void io_bpf_run_task_work(struct callback_head *cb)
 	mutex_unlock(&ctx->uring_lock);
 }
 
-static int io_bpf(struct io_kiocb *req, unsigned int issue_flags)
+static int io_cq_bpf(struct io_kiocb *req, unsigned int issue_flags)
+{
+	init_task_work(&req->task_work, io_bpf_run_task_work);
+	if (unlikely(io_req_task_work_add(req))) {
+		req_ref_get(req);
+		io_req_task_queue_fail(req, -ECANCELED);
+	}
+	return 0;
+}
+
+static int io_sq_bpf(struct io_kiocb *req, unsigned int issue_flags)
 {
 	init_task_work(&req->task_work, io_bpf_run_task_work);
 	if (unlikely(io_req_task_work_add(req))) {
@@ -6078,8 +6102,10 @@ static int io_req_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 		return io_renameat_prep(req, sqe);
 	case IORING_OP_UNLINKAT:
 		return io_unlinkat_prep(req, sqe);
-	case IORING_OP_BPF:
-		return io_bpf_prep(req, sqe);
+	case IORING_OP_CQ_BPF:
+		return io_cq_bpf_prep(req, sqe);
+	case IORING_OP_SQ_BPF:
+		return io_sq_bpf_prep(req, sqe);
 	}
 
 	printk_once(KERN_WARNING "io_uring: unhandled opcode %d\n",
@@ -6347,8 +6373,11 @@ static int io_issue_sqe(struct io_kiocb *req, unsigned int issue_flags)
 	case IORING_OP_UNLINKAT:
 		ret = io_unlinkat(req, issue_flags);
 		break;
-	case IORING_OP_BPF:
-		ret = io_bpf(req, issue_flags);
+	case IORING_OP_CQ_BPF:
+		ret = io_cq_bpf(req, issue_flags);
+		break;
+	case IORING_OP_SQ_BPF:
+		ret = io_sq_bpf(req, issue_flags);
 		break;
 	default:
 		ret = -EINVAL;
@@ -8719,7 +8748,7 @@ static void io_req_caches_free(struct io_ring_ctx *ctx)
 	mutex_unlock(&ctx->uring_lock);
 }
 
-static int cq_bpf_unregister(struct io_ring_ctx *ctx)
+static int io_cq_bpf_unregister(struct io_ring_ctx *ctx)
 {
 	int i;
 
@@ -8738,18 +8767,18 @@ static int cq_bpf_unregister(struct io_ring_ctx *ctx)
 	return 0;
 }
 
-static int sq_bpf_unregister(struct io_ring_ctx *ctx)
+static int io_sq_bpf_unregister(struct io_ring_ctx *ctx)
 {
 	return 0;
 }
 
 /**
- * cq_bpf_register - register a BPF for completion queue
+ * io_cq_bpf_register - register a BPF for completion queue
  * @ctx: the io_uring to be registered
  * @arg: pointer to the bpf programs
  * @nr_args: the number of bpf programs to be registered
  */
-static int cq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
+static int io_cq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 			   unsigned int nr_args)
 {
 	u32 __user *fds = arg;
@@ -8786,8 +8815,14 @@ static int cq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 
 	ctx->nr_cq_bpf_progs = i;
 	if (ret)
-		cq_bpf_unregister(ctx);
+		io_cq_bpf_unregister(ctx);
 	return ret;
+}
+
+static int io_sq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
+			   unsigned int nr_args)
+{
+	return 0;
 }
 
 static bool io_wait_rsrc_data(struct io_rsrc_data *data)
@@ -8820,7 +8855,8 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 	mutex_unlock(&ctx->uring_lock);
 	io_eventfd_unregister(ctx);
 	io_destroy_buffers(ctx);
-	cq_bpf_unregister(ctx);
+	io_sq_bpf_unregister(ctx);
+	io_cq_bpf_unregister(ctx);
 	if (ctx->sq_creds)
 		put_cred(ctx->sq_creds);
 
@@ -10354,14 +10390,22 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 		ret = io_register_rsrc_update(ctx, arg, nr_args);
 		break;
 	case IORING_REGISTER_CQ_BPF:
-		ret = cq_bpf_register(ctx, arg, nr_args);
+		ret = io_cq_bpf_register(ctx, arg, nr_args);
 		break;
 	case IORING_UNREGISTER_CQ_BPF:
 		ret = -EINVAL;
 		if (arg || nr_args)
 			break;
-		ret = cq_bpf_unregister(ctx);
+		ret = io_cq_bpf_unregister(ctx);
 		break;
+	case IORING_REGISTER_SQ_BPF:
+		ret = io_sq_bpf_register(ctx, arg, nr_args);
+		break;
+	case IORING_UNREGISTER_SQ_BPF:
+		ret = -EINVAL;
+		if (arg || nr_args)
+			break;
+		ret = io_sq_bpf_unregister(ctx);
 	default:
 		ret = -EINVAL;
 		break;
@@ -10656,7 +10700,7 @@ const struct bpf_verifier_ops sqring_verifier_ops = {
 	.is_valid_access	= sq_bpf_is_valid_access,
 };
 
-static inline bool io_bpf_need_wake(struct io_async_bpf *abpf)
+static inline bool io_bpf_need_wake(struct cq_async_bpf *abpf)
 {
 	struct io_kiocb *req = abpf->wqe.private;
 	struct io_ring_ctx *ctx = req->ctx;
@@ -10670,7 +10714,7 @@ static inline bool io_bpf_need_wake(struct io_async_bpf *abpf)
 static int io_bpf_wait_func(struct wait_queue_entry *wqe, unsigned mode,
 			       int sync, void *key)
 {
-	struct io_async_bpf *abpf = container_of(wqe, struct io_async_bpf, wqe);
+	struct cq_async_bpf *abpf = container_of(wqe, struct cq_async_bpf, wqe);
 	bool wake = io_bpf_need_wake(abpf);
 
 	if (wake) {
@@ -10687,7 +10731,7 @@ static int io_bpf_wait_cq_async(struct io_kiocb *req, unsigned int nr,
 	struct io_ring_ctx *ctx = req->ctx;
 	struct wait_queue_head *wq;
 	struct wait_queue_entry *wqe;
-	struct io_async_bpf *abpf;
+	struct cq_async_bpf *abpf;
 
 	if (unlikely(idx >= ctx->cq_nr))
 		return -EINVAL;
