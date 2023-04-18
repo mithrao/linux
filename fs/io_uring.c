@@ -1107,7 +1107,8 @@ static void io_rsrc_put_work(struct work_struct *work);
 static void io_req_task_queue(struct io_kiocb *req);
 static void io_submit_flush_completions(struct io_comp_state *cs,
 					struct io_ring_ctx *ctx);
-static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags);
+static void io_cq_bpf_run(struct io_kiocb *req, unsigned int issue_flags);
+static void io_sq_bpf_run(struct io_kiocb *req, unsigned int issue_flags);
 static bool io_poll_remove_waitqs(struct io_kiocb *req);
 static int io_req_prep_async(struct io_kiocb *req);
 
@@ -3998,22 +3999,56 @@ static int io_cq_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 
 static int io_sq_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
+	struct io_ring_ctx *ctx = req->ctx;
+	struct bpf_prog *prog;
+	unsigned int idx;
+
+	/* copy from io_cq_bpf_prep */
+	if (unlikely(ctx->flags & (IORING_SETUP_IOPOLL|IORING_SETUP_SQPOLL)))
+		return -EINVAL;
+	if (unlikely(req->flags & (REQ_F_FIXED_FILE | REQ_F_BUFFER_SELECT)))
+		return -EINVAL;
+	if (sqe->ioprio || sqe->len || sqe->cancel_flags)
+		return -EINVAL;
+	if (sqe->addr)
+		return -EINVAL;
+
+	/* sqe->off??? */
+	idx = READ_ONCE(sqe->off);  /* offset into file */
+	if (unlikely(idx >= ctx->nr_sq_bpf_progs))
+		return -EFAULT;
+	idx = array_index_nospec(idx, ctx->nr_sq_bpf_progs);
+	prog = ctx->sq_bpf_progs[idx].prog;
+	if (!prog)
+		return -EFAULT;
+
+	req->bpf.prog = prog;
 	return 0;
 }
 
-static void io_bpf_run_task_work(struct callback_head *cb)
+static void io_cq_bpf_run_task_work(struct callback_head *cb)
 {
 	struct io_kiocb *req = container_of(cb, struct io_kiocb, task_work);
 	struct io_ring_ctx *ctx = req->ctx;
 
 	mutex_lock(&ctx->uring_lock);
-	io_bpf_run(req, 0);
+	io_cq_bpf_run(req, 0);
+	mutex_unlock(&ctx->uring_lock);
+}
+
+static void io_sq_bpf_run_task_work(struct callback_head *cb)
+{
+	struct io_kiocb *req = container_of(cb, struct io_kiocb, task_work);
+	struct io_ring_ctx *ctx = req->ctx;
+
+	mutex_lock(&ctx->uring_lock);
+	io_sq_bpf_run(req, 0);
 	mutex_unlock(&ctx->uring_lock);
 }
 
 static int io_cq_bpf(struct io_kiocb *req, unsigned int issue_flags)
 {
-	init_task_work(&req->task_work, io_bpf_run_task_work);
+	init_task_work(&req->task_work, io_cq_bpf_run_task_work);
 	if (unlikely(io_req_task_work_add(req))) {
 		req_ref_get(req);
 		io_req_task_queue_fail(req, -ECANCELED);
@@ -4023,7 +4058,7 @@ static int io_cq_bpf(struct io_kiocb *req, unsigned int issue_flags)
 
 static int io_sq_bpf(struct io_kiocb *req, unsigned int issue_flags)
 {
-	init_task_work(&req->task_work, io_bpf_run_task_work);
+	init_task_work(&req->task_work, io_sq_bpf_run_task_work);
 	if (unlikely(io_req_task_work_add(req))) {
 		req_ref_get(req);
 		io_req_task_queue_fail(req, -ECANCELED);
@@ -8769,6 +8804,20 @@ static int io_cq_bpf_unregister(struct io_ring_ctx *ctx)
 
 static int io_sq_bpf_unregister(struct io_ring_ctx *ctx)
 {
+	int i;
+
+	if (!ctx->nr_sq_bpf_progs)
+		return -ENXIO;
+
+	for (i = 0; i < ctx->nr_sq_bpf_progs; ++i) {
+		struct bpf_prog *prog = ctx->sq_bpf_progs[i].prog;
+
+		if (prog)
+			bpf_prog_put(prog);
+	}
+	kfree(ctx->sq_bpf_progs);
+	ctx->sq_bpf_progs = NULL;
+	ctx->nr_sq_bpf_progs = 0;
 	return 0;
 }
 
@@ -8784,7 +8833,7 @@ static int io_cq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 	u32 __user *fds = arg;
 	int i, ret = 0;
 
-	if (!nr_args || nr_args > IORING_MAX_BPF_PROGS)
+	if (!nr_args || nr_args + ctx->nr_sq_bpf_progs > IORING_MAX_BPF_PROGS)
 		return -EINVAL;
 	if (ctx->nr_cq_bpf_progs)
 		return -EBUSY;
@@ -8819,10 +8868,49 @@ static int io_cq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 	return ret;
 }
 
+/**
+ * TODO: 按理说只需要注册一个BPF程序？
+ */
 static int io_sq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 			   unsigned int nr_args)
 {
-	return 0;
+	u32 __user *fds = arg;
+	int i, ret = 0;
+
+	if (!nr_args || nr_args + ctx->nr_cq_bpf_progs > IORING_MAX_BPF_PROGS)
+		return -EINVAL;
+	
+	if (ctx->nr_sq_bpf_progs) /* can only register once */
+		return -EBUSY;
+	
+	ctx->sq_bpf_progs = kcalloc(nr_args, sizeof(ctx->sq_bpf_progs[0]),
+				 GFP_KERNEL);
+	if (!ctx->sq_bpf_progs)
+		return -ENOMEM;
+
+	for (i = 0; i < nr_args; ++i) {
+		struct bpf_prog *prog;
+		u32 fd;
+
+		if (copy_from_user(&fd, &fds[i], sizeof(fd))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (fd == -1)
+			continue;
+
+		prog = bpf_prog_get_type(fd, BPF_PROG_TYPE_SQRING);
+		if (IS_ERR(prog)) {
+			ret = PTR_ERR(prog);
+			break;
+		}
+		ctx->sq_bpf_progs[i].prog = prog;
+	}
+
+	ctx->nr_sq_bpf_progs = i;
+	if (ret)
+		io_sq_bpf_unregister(ctx);
+	return ret;
 }
 
 static bool io_wait_rsrc_data(struct io_rsrc_data *data)
@@ -10406,6 +10494,7 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 		if (arg || nr_args)
 			break;
 		ret = io_sq_bpf_unregister(ctx);
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -10419,7 +10508,7 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 	return ret;
 }
 
-BPF_CALL_3(io_bpf_queue_sqe, struct cq_bpf_ctx *,		bpf_ctx,
+BPF_CALL_3(cq_bpf_queue_sqe, struct cq_bpf_ctx *,		bpf_ctx,
 			     const struct io_uring_sqe *,	sqe,
 			     u32,				sqe_len)
 {
@@ -10443,7 +10532,7 @@ BPF_CALL_3(io_bpf_queue_sqe, struct cq_bpf_ctx *,		bpf_ctx,
 	return !io_submit_sqe(ctx, req, sqe);
 }
 
-BPF_CALL_5(io_bpf_emit_cqe, struct cq_bpf_ctx *,		bpf_ctx,
+BPF_CALL_5(cq_bpf_emit_cqe, struct cq_bpf_ctx *,		bpf_ctx,
 			    u32,				cq_idx,
 			    u64,				user_data,
 			    s32,				res,
@@ -10466,7 +10555,7 @@ BPF_CALL_5(io_bpf_emit_cqe, struct cq_bpf_ctx *,		bpf_ctx,
 	return submitted ? 0 : -ENOMEM;
 }
 
-BPF_CALL_4(io_bpf_reap_cqe, struct cq_bpf_ctx *,		bpf_ctx,
+BPF_CALL_4(cq_bpf_reap_cqe, struct cq_bpf_ctx *,		bpf_ctx,
 			    u32,				cq_idx,
 			    struct io_uring_cqe *,		cqe_out,
 			    u32,				cqe_len)
@@ -10502,80 +10591,32 @@ err:
 	return ret;
 }
 
-BPF_CALL_3(io_bpf_register_restrictions, struct cq_bpf_ctx *, bpf_ctx,
-			struct io_uring_restriction *, res,
-			u32, nr_res)
+BPF_CALL_3(sq_bpf_queue_sqe, struct sq_bpf_ctx *,		bpf_ctx,
+			     const struct io_uring_sqe *,	sqe,
+			     u32,				sqe_len)
 {
 	struct io_ring_ctx *ctx = bpf_ctx->ctx;
-	size_t size;
-	int i, ret;
+	struct io_kiocb *req;
 
-	/* Restrictions allowed only if rings started disabled */
-	if (!(ctx->flags & IORING_SETUP_R_DISABLED))
-		return -EBADFD;
-
-	/* We allow only a single restrictions registration */
-	if (ctx->restrictions.registered)
-		return -EBUSY;
-
-	if (!res || nr_res > IORING_MAX_RESTRICTIONS)
+	if (sqe_len != sizeof(struct io_uring_sqe))
 		return -EINVAL;
 
-	size = array_size(nr_res, sizeof(*res));
-	if (size == SIZE_MAX)
-		return -EOVERFLOW;
-
-	ret = 0;
-
-	for (i = 0; i < nr_res; i++) {
-		switch (res[i].opcode) {
-		case IORING_RESTRICTION_REGISTER_OP:
-			if (res[i].register_op >= IORING_REGISTER_LAST) {
-				ret = -EINVAL;
-				goto out;
-			}
-
-			__set_bit(res[i].register_op,
-				  ctx->restrictions.register_op);
-			break;
-		case IORING_RESTRICTION_SQE_OP:
-			if (res[i].sqe_op >= IORING_OP_LAST) {
-				ret = -EINVAL;
-				goto out;
-			}
-
-			__set_bit(res[i].sqe_op, ctx->restrictions.sqe_op);
-			break;
-		case IORING_RESTRICTION_SQE_FLAGS_ALLOWED:
-			ctx->restrictions.sqe_flags_allowed = res[i].sqe_flags;
-			break;
-		case IORING_RESTRICTION_SQE_FLAGS_REQUIRED:
-			ctx->restrictions.sqe_flags_required = res[i].sqe_flags;
-			break;
-		default:
-			ret = -EINVAL;
-			goto out;
-		}
+	req = io_alloc_req(ctx);
+	if (unlikely(!req))
+		return -ENOMEM;
+	if (!percpu_ref_tryget_many(&ctx->refs, 1)) {
+		kmem_cache_free(req_cachep, req);
+		return -EAGAIN;
 	}
+	percpu_counter_add(&current->io_uring->inflight, 1);
+	refcount_add(1, &current->usage);
 
-out:
-	/* Reset all restrictions if an error happened */
-	if (ret != 0)
-		memset(&ctx->restrictions, 0, sizeof(ctx->restrictions));
-	else
-		ctx->restrictions.registered = true;
-	return ret;
+	/* returns number of submitted SQEs or an error */
+	return !io_submit_sqe(ctx, req, sqe);
 }
 
-BPF_CALL_1(io_bpf_register_enable_rings, struct cq_bpf_ctx *, bpf_ctx)
-{
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
-	int ret = io_register_enable_rings(ctx);
-	return ret;
-}
-
-const struct bpf_func_proto io_bpf_queue_sqe_proto = {
-	.func = io_bpf_queue_sqe,
+const struct bpf_func_proto cq_bpf_queue_sqe_proto = {
+	.func = cq_bpf_queue_sqe,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 	.arg1_type = ARG_PTR_TO_CTX,
@@ -10583,8 +10624,8 @@ const struct bpf_func_proto io_bpf_queue_sqe_proto = {
 	.arg3_type = ARG_CONST_SIZE,
 };
 
-const struct bpf_func_proto io_bpf_emit_cqe_proto = {
-	.func = io_bpf_emit_cqe,
+const struct bpf_func_proto cq_bpf_emit_cqe_proto = {
+	.func = cq_bpf_emit_cqe,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 	.arg1_type = ARG_PTR_TO_CTX,
@@ -10594,8 +10635,8 @@ const struct bpf_func_proto io_bpf_emit_cqe_proto = {
 	.arg5_type = ARG_ANYTHING,
 };
 
-const struct bpf_func_proto io_bpf_reap_cqe_proto = {
-	.func = io_bpf_reap_cqe,
+const struct bpf_func_proto cq_bpf_reap_cqe_proto = {
+	.func = cq_bpf_reap_cqe,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 	.arg1_type = ARG_PTR_TO_CTX,
@@ -10604,20 +10645,13 @@ const struct bpf_func_proto io_bpf_reap_cqe_proto = {
 	.arg4_type = ARG_CONST_SIZE,
 };
 
-const struct bpf_func_proto io_bpf_register_restrictions_proto = {
-	.func = io_bpf_register_restrictions,
+const struct bpf_func_proto sq_bpf_queue_sqe_proto = {
+	.func = sq_bpf_queue_sqe,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 	.arg1_type = ARG_PTR_TO_CTX,
-	.arg2_type = ARG_ANYTHING,
-	.arg3_type = ARG_ANYTHING,
-};
-
-const struct bpf_func_proto io_bpf_register_enable_rings_proto = {
-	.func = io_bpf_register_enable_rings,
-	.gpl_only = false,
-	.ret_type = RET_INTEGER,
-	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_MEM,
+	.arg3_type = ARG_CONST_SIZE,
 };
 
 static const struct bpf_func_proto *
@@ -10628,16 +10662,12 @@ cq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_copy_from_user_proto;
 	case BPF_FUNC_copy_to_user:
 		return &bpf_copy_to_user_proto;
-	case BPF_FUNC_iouring_queue_sqe:
-		return &io_bpf_queue_sqe_proto;
-	case BPF_FUNC_iouring_emit_cqe:
-		return &io_bpf_emit_cqe_proto;
-	case BPF_FUNC_iouring_reap_cqe:
-		return &io_bpf_reap_cqe_proto;
-	case BPF_FUNC_iouring_register_restrictions:
-		return &io_bpf_register_restrictions_proto;
-	case BPF_FUNC_iouring_register_enable_rings:
-		return &io_bpf_register_enable_rings_proto;
+	case BPF_FUNC_cqring_queue_sqe:
+		return &cq_bpf_queue_sqe_proto;
+	case BPF_FUNC_cqring_emit_cqe:
+		return &cq_bpf_emit_cqe_proto;
+	case BPF_FUNC_cqring_reap_cqe:
+		return &cq_bpf_reap_cqe_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}
@@ -10646,7 +10676,16 @@ cq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 static const struct bpf_func_proto *
 sq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
-	return bpf_base_func_proto(func_id);
+	switch (func_id) {
+	case BPF_FUNC_copy_from_user:
+		return &bpf_copy_from_user_proto;
+	case BPF_FUNC_copy_to_user:
+		return &bpf_copy_to_user_proto;
+	case BPF_FUNC_sqring_queue_sqe:
+		return &sq_bpf_queue_sqe_proto;
+	default:
+		return bpf_base_func_proto(func_id);
+	}
 }
 
 static bool cq_bpf_is_valid_access(int off, int size,
@@ -10754,7 +10793,7 @@ static int io_bpf_wait_cq_async(struct io_kiocb *req, unsigned int nr,
 	return 0;
 }
 
-static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
+static void io_cq_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_ring_ctx *ctx = req->ctx;
 	struct cq_bpf_ctx bpf_ctx;
@@ -10791,6 +10830,11 @@ static void io_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 	}
 done:
 	__io_req_complete(req, issue_flags, ret, 0);
+}
+
+static void io_sq_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
+{
+	return;
 }
 
 SYSCALL_DEFINE4(io_uring_register, unsigned int, fd, unsigned int, opcode,

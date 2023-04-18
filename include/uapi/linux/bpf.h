@@ -4090,12 +4090,11 @@ union bpf_attr {
 	FN(ima_inode_hash),		\
 	FN(sock_from_file),		\
 	FN(check_mtu),			\
-	FN(iouring_queue_sqe),		\
-	FN(iouring_emit_cqe),		\
-	FN(iouring_reap_cqe),		\
+	FN(cqring_queue_sqe),		\
+	FN(cqring_emit_cqe),		\
+	FN(cqring_reap_cqe),		\
 	FN(copy_to_user),		\
-	FN(iouring_register_restrictions), \
-	FN(iouring_register_enable_rings), \
+	FN(sqring_queue_sqe),		\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
