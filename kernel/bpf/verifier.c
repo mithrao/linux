@@ -8561,6 +8561,9 @@ static int check_return_code(struct bpf_verifier_env *env)
 	case BPF_PROG_TYPE_CQRING:
 		range = tnum_const(0);
 		break;
+	case BPF_PROG_TYPE_SQRING:
+		range = tnum_const(0);
+		break;
 	case BPF_PROG_TYPE_EXT:
 		/* freplace program can return anything as its return value
 		 * depends on the to-be-replaced kernel func or bpf program.
@@ -12563,7 +12566,8 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 	u64 key;
 
 	if (prog->aux->sleepable && prog->type != BPF_PROG_TYPE_TRACING &&
-	    prog->type != BPF_PROG_TYPE_LSM && prog->type != BPF_PROG_TYPE_CQRING) {
+	    prog->type != BPF_PROG_TYPE_LSM && prog->type != BPF_PROG_TYPE_CQRING 
+		&& prog->type != BPF_PROG_TYPE_SQRING) {
 		verbose(env, "Only fentry/fexit/fmod_ret and lsm programs can be sleepable\n");
 		return -EINVAL;
 	}

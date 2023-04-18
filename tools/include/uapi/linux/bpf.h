@@ -207,6 +207,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_LSM,
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_CQRING,
+	BPG_PROG_TYPR_SQRING,
 };
 
 enum bpf_attach_type {

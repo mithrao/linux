@@ -419,8 +419,8 @@ struct io_ring_ctx {
 	u32			pers_next;
 
 	/* bpf programs */
-	unsigned		nr_bpf_progs;
-	struct io_bpf_prog	*bpf_progs;
+	unsigned		nr_cq_bpf_progs;
+	struct io_bpf_prog	*cq_bpf_progs;
 
 	struct fasync_struct	*cq_fasync;
 	struct eventfd_ctx	*cq_ev_fd;
@@ -3976,10 +3976,10 @@ static int io_bpf_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 		return -EINVAL;
 
 	idx = READ_ONCE(sqe->off);
-	if (unlikely(idx >= ctx->nr_bpf_progs))
+	if (unlikely(idx >= ctx->nr_cq_bpf_progs))
 		return -EFAULT;
-	idx = array_index_nospec(idx, ctx->nr_bpf_progs);
-	prog = ctx->bpf_progs[idx].prog;
+	idx = array_index_nospec(idx, ctx->nr_cq_bpf_progs);
+	prog = ctx->cq_bpf_progs[idx].prog;
 	if (!prog)
 		return -EFAULT;
 
@@ -8719,32 +8719,37 @@ static void io_req_caches_free(struct io_ring_ctx *ctx)
 	mutex_unlock(&ctx->uring_lock);
 }
 
-static int io_bpf_unregister(struct io_ring_ctx *ctx)
+static int cq_bpf_unregister(struct io_ring_ctx *ctx)
 {
 	int i;
 
-	if (!ctx->nr_bpf_progs)
+	if (!ctx->nr_cq_bpf_progs)
 		return -ENXIO;
 
-	for (i = 0; i < ctx->nr_bpf_progs; ++i) {
-		struct bpf_prog *prog = ctx->bpf_progs[i].prog;
+	for (i = 0; i < ctx->nr_cq_bpf_progs; ++i) {
+		struct bpf_prog *prog = ctx->cq_bpf_progs[i].prog;
 
 		if (prog)
 			bpf_prog_put(prog);
 	}
-	kfree(ctx->bpf_progs);
-	ctx->bpf_progs = NULL;
-	ctx->nr_bpf_progs = 0;
+	kfree(ctx->cq_bpf_progs);
+	ctx->cq_bpf_progs = NULL;
+	ctx->nr_cq_bpf_progs = 0;
+	return 0;
+}
+
+static int sq_bpf_unregister(struct io_ring_ctx *ctx)
+{
 	return 0;
 }
 
 /**
- * io_bpf_register
+ * cq_bpf_register - register a BPF for completion queue
  * @ctx: the io_uring to be registered
  * @arg: pointer to the bpf programs
  * @nr_args: the number of bpf programs to be registered
  */
-static int io_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
+static int cq_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 			   unsigned int nr_args)
 {
 	u32 __user *fds = arg;
@@ -8752,12 +8757,12 @@ static int io_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 
 	if (!nr_args || nr_args > IORING_MAX_BPF_PROGS)
 		return -EINVAL;
-	if (ctx->nr_bpf_progs)
+	if (ctx->nr_cq_bpf_progs)
 		return -EBUSY;
 
-	ctx->bpf_progs = kcalloc(nr_args, sizeof(ctx->bpf_progs[0]),
+	ctx->cq_bpf_progs = kcalloc(nr_args, sizeof(ctx->cq_bpf_progs[0]),
 				 GFP_KERNEL);
-	if (!ctx->bpf_progs)
+	if (!ctx->cq_bpf_progs)
 		return -ENOMEM;
 
 	for (i = 0; i < nr_args; ++i) {
@@ -8776,12 +8781,12 @@ static int io_bpf_register(struct io_ring_ctx *ctx, void __user *arg,
 			ret = PTR_ERR(prog);
 			break;
 		}
-		ctx->bpf_progs[i].prog = prog;
+		ctx->cq_bpf_progs[i].prog = prog;
 	}
 
-	ctx->nr_bpf_progs = i;
+	ctx->nr_cq_bpf_progs = i;
 	if (ret)
-		io_bpf_unregister(ctx);
+		cq_bpf_unregister(ctx);
 	return ret;
 }
 
@@ -8815,7 +8820,7 @@ static void io_ring_ctx_free(struct io_ring_ctx *ctx)
 	mutex_unlock(&ctx->uring_lock);
 	io_eventfd_unregister(ctx);
 	io_destroy_buffers(ctx);
-	io_bpf_unregister(ctx);
+	cq_bpf_unregister(ctx);
 	if (ctx->sq_creds)
 		put_cred(ctx->sq_creds);
 
@@ -10348,14 +10353,14 @@ static int __io_uring_register(struct io_ring_ctx *ctx, unsigned opcode,
 	case IORING_REGISTER_RSRC_UPDATE:
 		ret = io_register_rsrc_update(ctx, arg, nr_args);
 		break;
-	case IORING_REGISTER_BPF:
-		ret = io_bpf_register(ctx, arg, nr_args);
+	case IORING_REGISTER_CQ_BPF:
+		ret = cq_bpf_register(ctx, arg, nr_args);
 		break;
-	case IORING_UNREGISTER_BPF:
+	case IORING_UNREGISTER_CQ_BPF:
 		ret = -EINVAL;
 		if (arg || nr_args)
 			break;
-		ret = io_bpf_unregister(ctx);
+		ret = cq_bpf_unregister(ctx);
 		break;
 	default:
 		ret = -EINVAL;
