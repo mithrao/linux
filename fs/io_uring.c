@@ -10647,6 +10647,57 @@ BPF_CALL_1(sq_bpf_do_iopoll, struct sq_bpf_ctx *, bpf_ctx)
 	return ret;
 }
 
+/**
+ * sq_bpf_reap_sqes - get sqes from sqring
+ * @sqes: the array of all sqes
+ * 
+ * @ret: the number of valid sqes
+ */
+BPF_CALL_2(sq_bpf_reap_sqes, struct sq_bpf_ctx *, bpf_ctx,
+							 struct io_uring_sqe * *, sqes)
+{
+	struct io_ring_ctx *ctx = bpf_ctx->ctx;
+	unsigned int nr, idx = 0;
+
+	mutex_lock(&ctx->uring_lock);
+	/* copy from io_submit_sqes(2) */
+
+	/* make sure SQ entry isn't read before tail */
+	nr = min3(nr, ctx->sq_entries, io_sqring_entries(ctx));
+	if (!percpu_ref_tryget_many(&ctx->refs, nr))
+		return -EAGAIN;
+
+	while (idx < nr) {
+		/* copy from io_get_sqe(1) */
+		const struct io_uring_sqe *sqe;
+
+		sqe = io_get_sqe(ctx);
+		if (unlikely(!sqe)) {
+			break;
+		}
+		*(sqes + idx) = sqe;
+		idx++;
+	}
+	mutex_unlock(&ctx->uring_lock);
+	return idx;
+}
+
+BPF_CALL_1(sq_bpf_get_sqes, struct sq_bpf_ctx *, bpf_ctx)
+{
+	return 0;
+}
+
+BPF_CALL_2(sq_bpf_drop_sqe, struct sq_bpf_ctx *, bpf_ctx,
+				const struct io_uring_sqe *,	sqe,)
+{
+	return 0;
+}
+
+BPF_CALL_1(sq_bpf_submit_sqes, struct sq_bpf_ctx *, bpf_ctx)
+{
+	return 0;
+}
+
 const struct bpf_func_proto cq_bpf_queue_sqe_proto = {
 	.func = cq_bpf_queue_sqe,
 	.gpl_only = false,
@@ -10700,6 +10751,14 @@ const struct bpf_func_proto sq_bpf_do_iopoll_proto = {
 	.arg1_type = ARG_PTR_TO_CTX,
 };
 
+const struct bpf_func_proto sq_bpf_reap_sqes_proto = {
+	.func = sq_bpf_reap_sqes,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_PTR_TO_CTX,
+	.arg2_type = ARG_PTR_TO_MEM,
+};
+
 static const struct bpf_func_proto *
 cq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 {
@@ -10733,6 +10792,8 @@ sq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &sq_bpf_sqring_entries_proto;
 	case BPF_FUNC_do_iopoll:
 		return &sq_bpf_do_iopoll_proto;
+	case BPF_FUNC_reap_sqes:
+		return &sq_bpf_reap_sqes_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}

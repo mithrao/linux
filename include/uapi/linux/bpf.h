@@ -4097,6 +4097,7 @@ union bpf_attr {
 	FN(sqring_queue_sqe),		\
 	FN(get_sqring_entries),	\
 	FN(do_iopoll),			\
+	FN(reap_sqes),			\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
