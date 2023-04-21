@@ -31297,14 +31297,15 @@ enum bpf_func_id {
 	BPF_FUNC_cqring_reap_cqe = 166,
 	BPF_FUNC_copy_to_user = 167,
 	BPF_FUNC_sqring_queue_sqe = 168,
-	BPF_FUNC_get_nr_sqe = 169,
-	BPF_FUNC_do_iopoll = 170,
-	BPF_FUNC_reap_sqe = 171,
-	BPF_FUNC_submit_sqe = 172,
-	BPF_FUNC_submit_state_start = 173,
-	BPF_FUNC_submit_state_end = 174,
-	BPF_FUNC_commit_sqring = 175,
-	__BPF_FUNC_MAX_ID = 176,
+	BPF_FUNC_sqring_sq_entries = 169,
+	BPF_FUNC_sqring_do_iopoll = 170,
+	BPF_FUNC_sqring_reap_sqe = 171,
+	BPF_FUNC_sqring_submit_sqe = 172,
+	BPF_FUNC_sqring_cq_entries = 173,
+	BPF_FUNC_submit_state_start = 174,
+	BPF_FUNC_submit_state_end = 175,
+	BPF_FUNC_commit_sqring = 176,
+	__BPF_FUNC_MAX_ID = 177,
 };
 
 enum {
@@ -40883,7 +40884,7 @@ struct io_ring_ctx {
 	struct io_bpf_prog *cq_bpf_progs;
 	unsigned int nr_sq_bpf_progs;
 	struct io_bpf_prog *sq_bpf_progs;
-	unsigned int bpf_filter_enable;
+	unsigned int bpf_submit_enable;
 	struct fasync_struct *cq_fasync;
 	struct eventfd_ctx *cq_ev_fd;
 	atomic_t cq_timeouts;
@@ -41220,6 +41221,10 @@ struct cq_async_bpf {
 	unsigned int wait_idx;
 };
 
+struct sq_async_bpf {
+	struct wait_queue_entry wqe;
+};
+
 struct io_async_connect {
 	struct __kernel_sockaddr_storage address;
 };
@@ -41372,13 +41377,15 @@ typedef u64 (*btf_cq_bpf_reap_cqe)(struct cq_bpf_ctx *, u32, struct io_uring_cqe
 
 typedef u64 (*btf_sq_bpf_queue_sqe)(struct sq_bpf_ctx *, const struct io_uring_sqe *, u32);
 
-typedef u64 (*btf_sq_bpf_get_nr_sqe)(struct sq_bpf_ctx *);
+typedef u64 (*btf_sq_bpf_sq_entries)(struct sq_bpf_ctx *);
 
-typedef u64 (*btf_sq_bpf_do_iopoll)(struct sq_bpf_ctx *);
+typedef u64 (*btf_sq_bpf_cq_entries)(struct sq_bpf_ctx *);
 
-typedef u64 (*btf_sq_bpf_reap_sqe)(struct sq_bpf_ctx *);
+typedef u64 (*btf_sq_bpf_do_iopoll)(struct sq_bpf_ctx *, unsigned int);
 
-typedef u64 (*btf_sq_bpf_submit_sqe)(struct sq_bpf_ctx *, const struct io_uring_sqe *);
+typedef u64 (*btf_sq_bpf_reap_sqe)(struct sq_bpf_ctx *, struct io_uring_sqe *, u32);
+
+typedef u64 (*btf_sq_bpf_submit_sqe)(struct sq_bpf_ctx *, const struct io_uring_sqe *, u32);
 
 typedef u64 (*btf_sq_bpf_submit_state_start)(struct sq_bpf_ctx *, unsigned int);
 

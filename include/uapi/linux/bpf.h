@@ -4095,10 +4095,11 @@ union bpf_attr {
 	FN(cqring_reap_cqe),		\
 	FN(copy_to_user),		\
 	FN(sqring_queue_sqe),		\
-	FN(sqring_sqe_entries),			\
+	FN(sqring_sq_entries),			\
 	FN(sqring_do_iopoll),			\
 	FN(sqring_reap_sqe),			\
 	FN(sqring_submit_sqe),			\
+	FN(sqring_cq_entries),	\
 	FN(submit_state_start), \
 	FN(submit_state_end),   \
 	FN(commit_sqring), 	 	\
