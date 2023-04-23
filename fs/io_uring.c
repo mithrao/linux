@@ -9676,6 +9676,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
 		}
 		submitted = to_submit;
 	} else if (ctx->bpf_submit_enable) {
+		io_cqring_overflow_flush(ctx, false);
 		if (unlikely(ctx->sq_bpf_progs == NULL)) {
 			goto out;
 		}
@@ -10641,106 +10642,49 @@ BPF_CALL_1(sq_bpf_cq_entries, struct sq_bpf_ctx *, bpf_ctx)
 	return __io_cqring_events(&ctx->cqs[0]);
 }
 
-BPF_CALL_2(sq_bpf_do_iopoll, struct sq_bpf_ctx *, bpf_ctx,
-							unsigned int, to_submit)
-{
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
-	unsigned int nr_events = 0;
-
-	/* copy from __io_sq_thread(2) */
-	if (!list_empty(&ctx->iopoll_list) || to_submit) {
-		mutex_lock(&ctx->uring_lock);
-		io_do_iopoll(ctx, &nr_events, 0);
-		mutex_unlock(&ctx->uring_lock);
-	}
-	return nr_events;
-}
-
 BPF_CALL_3(sq_bpf_reap_sqe, struct sq_bpf_ctx *, bpf_ctx,
 				struct io_uring_sqe *,	sqe_out,
 				u32, 					sqe_len)
 {
 	struct io_ring_ctx *ctx = bpf_ctx->ctx;
 	struct io_uring_sqe *sqe;
-	int ret = -EINVAL;
+	unsigned nr_events = 0;
+	int ret = -EINVAL, nr = 1;
 
-	if (unlikely(sqe_len != sizeof(*sqe_out)))
-		goto err;
+	if (unlikely(sqe_len != sizeof(*sqe_out))) 
+		goto out;
 
 	mutex_lock(&ctx->uring_lock);
-	sqe = io_get_sqe(ctx);
-	mutex_unlock(&ctx->uring_lock);
-	memcpy(sqe_out, sqe, sizeof(*sqe_out));
-	return 0;
-err:
-	memset(sqe_out, 0, sizeof(*sqe_out));
-	return ret;
-}
+	if (!list_empty(&ctx->iopoll_list))
+		io_do_iopoll(ctx, &nr_events, 0);
 
-/** sq_bpf_submit_sqe - submit an SQE to kernel
- * @sqe: the sqe to be submitted
- * 
- * @ret: 0 - invalid SQE; -EAGAIN - fail to alloc req; 1 - success
- */
-BPF_CALL_3(sq_bpf_submit_sqe, struct sq_bpf_ctx *, bpf_ctx,
-					const struct io_uring_sqe *, sqe,
-					u32,						 sqe_len)
-{
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
-	struct io_kiocb *req;
-	int nr = 1, ret;
-
-	if (sqe_len != sizeof(struct io_uring_sqe))
-		return -EINVAL;
-	req = io_alloc_req(ctx);
-	if (unlikely(!req))
-		return -ENOMEM;
+	/* make sure SQ entry isn't read before tail */
+	nr = min3(nr, ctx->sq_entries, io_sqring_entries(ctx));
 	if (!percpu_ref_tryget_many(&ctx->refs, nr)) {
-		kmem_cache_free(req_cachep, req);
-		return -EAGAIN;
+		ret = -EAGAIN;
+		goto out;
 	}
 
-	percpu_counter_add(&current->io_uring->inflight, nr);
-	refcount_add(nr, &current->usage);
-	
-	/* returns number of submitted SQEs or an error */
-	return !io_submit_sqe(ctx, req, sqe);
-}
-
-BPF_CALL_2(sq_bpf_submit_state_start, struct sq_bpf_ctx *, bpf_ctx,
-					unsigned int, nr)
-{
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
 	percpu_counter_add(&current->io_uring->inflight, nr);
 	refcount_add(nr, &current->usage);
 	io_submit_state_start(&ctx->submit_state, nr);
-	return 0;
-}
 
-BPF_CALL_3(sq_bpf_submit_state_end, struct sq_bpf_ctx *, bpf_ctx,
-					unsigned int, nr,
-					int, submitted)
-{
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
-	if (unlikely(submitted != nr)) {
-		int ref_used = (submitted == -EAGAIN) ? 0 : submitted;
-		struct io_uring_task *tctx = current->io_uring;
-		int unused = nr - ref_used;
-
-		percpu_ref_put_many(&ctx->refs, unused);
-		percpu_counter_sub(&tctx->inflight, unused);
-		put_task_struct_many(current, unused);
-	}
-	io_submit_state_end(&ctx->submit_state, ctx);
-	return 0;
-}
-
-BPF_CALL_1(sq_bpf_commit_sqring, struct sq_bpf_ctx *, bpf_ctx)
-{
-	struct io_ring_ctx *ctx = bpf_ctx->ctx;
-	/* Commit SQ ring head once we've consumed and submitted all SQEs */
-	io_commit_sqring(ctx);
-	return 0;
+	sqe = io_get_sqe(ctx);
+	if (unlikely(!sqe)) 
+		goto err;
+	
+	ret = nr;
+	goto out;
+err:
+	unsigned int unused = nr;
+	struct io_uring_task *tctx = current->io_uring;
+	percpu_ref_put_many(&ctx->refs, unused);
+	percpu_counter_sub(&tctx->inflight, unused);
+	put_task_struct_many(current, unused);
+out:
+	mutex_unlock(&ctx->uring_lock);
+	memset(sqe_out, sqe, sizeof(*sqe_out));
+	return ret;
 }
 
 const struct bpf_func_proto cq_bpf_queue_sqe_proto = {
@@ -10796,14 +10740,6 @@ const struct bpf_func_proto sq_bpf_cq_entries_proto = {
 	.arg1_type = ARG_PTR_TO_CTX,
 };
 
-const struct bpf_func_proto sq_bpf_do_iopoll_proto = {
-	.func = sq_bpf_do_iopoll,
-	.gpl_only = false,
-	.ret_type = RET_INTEGER,
-	.arg1_type = ARG_PTR_TO_CTX,
-	.arg2_type = ARG_ANYTHING,
-};
-
 const struct bpf_func_proto sq_bpf_reap_sqe_proto = {
 	.func = sq_bpf_reap_sqe,
 	.gpl_only = false,
@@ -10811,39 +10747,6 @@ const struct bpf_func_proto sq_bpf_reap_sqe_proto = {
 	.arg1_type = ARG_PTR_TO_CTX,
 	.arg2_type = ARG_PTR_TO_UNINIT_MEM,
 	.arg3_type = ARG_CONST_SIZE,
-};
-
-const struct bpf_func_proto sq_bpf_submit_sqe_proto = {
-	.func = sq_bpf_submit_sqe,
-	.gpl_only = false,
-	.ret_type = RET_INTEGER,
-	.arg1_type = ARG_PTR_TO_CTX,
-	.arg2_type = ARG_PTR_TO_MEM,
-	.arg3_type = ARG_CONST_SIZE,
-};
-
-const struct bpf_func_proto sq_bpf_submit_state_start_proto = {
-	.func = sq_bpf_submit_state_start,
-	.gpl_only = false,
-	.ret_type = RET_INTEGER,
-	.arg1_type = ARG_PTR_TO_CTX,
-	.arg2_type = ARG_ANYTHING,
-};
-
-const struct bpf_func_proto sq_bpf_submit_state_end_proto = {
-	.func = sq_bpf_submit_state_end,
-	.gpl_only = false,
-	.ret_type = RET_INTEGER,
-	.arg1_type = ARG_PTR_TO_CTX,
-	.arg2_type = ARG_ANYTHING,
-	.arg3_type = ARG_ANYTHING,
-};
-
-const struct bpf_func_proto sq_bpf_commit_sqring_proto = {
-	.func = sq_bpf_commit_sqring,
-	.gpl_only = false,
-	.ret_type = RET_INTEGER,
-	.arg1_type = ARG_PTR_TO_CTX,
 };
 
 static const struct bpf_func_proto *
@@ -10879,18 +10782,8 @@ sq_bpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &sq_bpf_sq_entries_proto;
 	case BPF_FUNC_sqring_cq_entries:
 		return &sq_bpf_cq_entries_proto;
-	case BPF_FUNC_sqring_do_iopoll:
-		return &sq_bpf_do_iopoll_proto;
 	case BPF_FUNC_sqring_reap_sqe:
 		return &sq_bpf_reap_sqe_proto;
-	case BPF_FUNC_sqring_submit_sqe:
-		return &sq_bpf_submit_sqe_proto;
-	case BPF_FUNC_submit_state_start:
-		return &sq_bpf_submit_state_start_proto;
-	case BPF_FUNC_submit_state_end:
-		return &sq_bpf_submit_state_end_proto;
-	case BPF_FUNC_commit_sqring:
-		return &sq_bpf_commit_sqring_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}
@@ -11100,7 +10993,6 @@ static void io_sq_bpf_run(struct io_kiocb *req, unsigned int issue_flags)
 	   TODO: when to set ctx->bpf_submit_enable = 0 ?? 
 	 */
 	ctx->bpf_submit_enable = 1;
-
 	lockdep_assert_held(&req->ctx->uring_lock);
 
 	if (unlikely(percpu_ref_is_dying(&ctx->refs)) ||

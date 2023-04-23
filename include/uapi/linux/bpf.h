@@ -4096,13 +4096,8 @@ union bpf_attr {
 	FN(copy_to_user),		\
 	FN(sqring_queue_sqe),		\
 	FN(sqring_sq_entries),			\
-	FN(sqring_do_iopoll),			\
 	FN(sqring_reap_sqe),			\
-	FN(sqring_submit_sqe),			\
 	FN(sqring_cq_entries),	\
-	FN(submit_state_start), \
-	FN(submit_state_end),   \
-	FN(commit_sqring), 	 	\
 	/* */
 
 /* integer value in 'imm' field of BPF_CALL instruction selects which helper
